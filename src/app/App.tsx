@@ -1,125 +1,63 @@
-import { useState, type ReactNode } from "react";
-import { Route, Routes, useLocation } from "react-router-dom";
-import { useLiveQuery } from "dexie-react-hooks";
-import { AppShell } from "../components/layout/AppShell";
-import { TodayView } from "../features/dashboard/TodayView";
-import { AssessmentList } from "../features/assessments/AssessmentList";
-import { AssessmentModal } from "../features/assessments/AssessmentModal";
+import { useEffect } from "react";
+import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
+import { Button } from "../components/ui/Button";
+import { ToastHost } from "../components/ui/Toast";
+import { AssessmentDialog } from "../features/assessments/AssessmentDialog";
+import { AssessmentsView } from "../features/assessments/AssessmentsView";
 import { CalendarView } from "../features/calendar/CalendarView";
-import { CourseList } from "../features/courses/CourseList";
-import { CourseModal } from "../features/courses/CourseModal";
-import { ThemeSwitcher } from "../features/settings/ThemeSwitcher";
-import { CommandPalette } from "./CommandPalette";
-import { courseService } from "../core/services/courseService";
-import { assessmentService } from "../core/services/assessmentService";
-import { db } from "../core/storage";
-import type { Course, CourseDraft, SlotDraft } from "../core/types";
+import { CommandPalette } from "../features/command-palette/CommandPalette";
+import { usePaletteHotkey } from "../features/command-palette/hotkey";
+import { CourseDialog } from "../features/courses/CourseDialog";
+import { CoursesView } from "../features/courses/CoursesView";
+import { SettingsView } from "../features/settings/SettingsView";
+import { TodayView } from "../features/today/TodayView";
+import { useClock } from "../state/hooks";
+import { useStore } from "../state/store";
+import { useReminders } from "../state/useReminders";
+import { ThemeProvider } from "../theme/ThemeProvider";
+import { ROUTES } from "./routes";
+import { Shell } from "./Shell";
 
-export default function App() {
-  const [courseOpen, setCourseOpen] = useState(false);
-  const [assessmentOpen, setAssessmentOpen] = useState(false);
-  const [editing, setEditing] = useState<Course | null>(null);
-  const courses = useLiveQuery(() =>
-    db.courses.where("status").equals("active").toArray(),
-  );
-  const editSlots = useLiveQuery(
-    () => (editing ? db.classSlots.where("courseId").equals(editing.id).toArray() : []),
-    [editing?.id],
-  );
-  const location = useLocation();
+export function App() {
+  const status = useStore((s) => s.status);
+  const loadError = useStore((s) => s.loadError);
+  const init = useStore((s) => s.init);
 
-  const openNewCourse = () => {
-    setEditing(null);
-    setCourseOpen(true);
-  };
-
-  const saveCourse = async (draft: CourseDraft) => {
-    if (editing) await courseService.update(editing.id, draft);
-    else await courseService.create(draft);
-    setEditing(null);
-  };
+  useEffect(() => {
+    void init();
+  }, [init]);
+  useClock();
+  usePaletteHotkey();
+  useReminders();
 
   return (
-    <>
-      <Routes>
-        <Route
-          element={
-            <AppShell
-              onAddCourse={openNewCourse}
-              onAddAssessment={() => setAssessmentOpen(true)}
-            />
-          }
-        >
-          <Route
-            path="/"
-            element={
-              <PageWithTheme>
-                <TodayView />
-              </PageWithTheme>
-            }
-          />
-          <Route
-            path="/assessments"
-            element={
-              <PageWithTheme>
-                <AssessmentList />
-              </PageWithTheme>
-            }
-          />
-          <Route
-            path="/calendar"
-            element={
-              <PageWithTheme>
-                <CalendarView />
-              </PageWithTheme>
-            }
-          />
-          <Route
-            path="/courses"
-            element={
-              <PageWithTheme>
-                <CourseList
-                  onAdd={openNewCourse}
-                  onEdit={(c) => {
-                    setEditing(c);
-                    setCourseOpen(true);
-                  }}
-                />
-              </PageWithTheme>
-            }
-          />
-        </Route>
-      </Routes>
-      <CourseModal
-        open={courseOpen}
-        onOpenChange={(o) => {
-          setCourseOpen(o);
-          if (!o) setEditing(null);
-        }}
-        course={editing}
-        slots={editSlots as SlotDraft[] | undefined}
-        onSave={saveCourse}
-      />
-      <AssessmentModal
-        open={assessmentOpen}
-        onOpenChange={setAssessmentOpen}
-        courses={courses ?? []}
-        onSave={(draft) => assessmentService.create(draft).then(() => undefined)}
-      />
-      <CommandPalette
-        key={location.pathname}
-        onAddCourse={openNewCourse}
-        onAddAssessment={() => setAssessmentOpen(true)}
-      />
-    </>
-  );
-}
-
-function PageWithTheme({ children }: { children: ReactNode }) {
-  return (
-    <div className="flex flex-col gap-6">
-      <ThemeSwitcher />
-      {children}
-    </div>
+    <ThemeProvider>
+      {status === "loading" ? (
+        <div className="grid h-full place-items-center text-sm text-muted" aria-busy="true">Loading your schedule…</div>
+      ) : status === "error" ? (
+        <div className="mx-auto flex h-full max-w-md flex-col items-center justify-center gap-4 px-6 text-center">
+          <h1 className="text-xl font-semibold">StudyFlow couldn't start</h1>
+          <p className="text-sm text-muted">{loadError}</p>
+          <Button variant="primary" onClick={() => void init()}>Try again</Button>
+        </div>
+      ) : (
+        <HashRouter>
+          <Routes>
+            <Route element={<Shell />}>
+              <Route path={ROUTES.today} element={<TodayView />} />
+              <Route path={ROUTES.assessments} element={<AssessmentsView />} />
+              <Route path={ROUTES.calendar} element={<CalendarView />} />
+              <Route path={ROUTES.courses} element={<CoursesView />} />
+              <Route path={ROUTES.settings} element={<SettingsView />} />
+              <Route path="*" element={<Navigate to={ROUTES.today} replace />} />
+            </Route>
+          </Routes>
+          <CommandPalette />
+          <CourseDialog />
+          <AssessmentDialog />
+          <ToastHost />
+        </HashRouter>
+      )}
+    </ThemeProvider>
   );
 }

@@ -2,9 +2,23 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>studyflow</title>
+    <title>StudyFlow</title>
+    <script>
+      // Paint the last-used theme background before JS loads to avoid a white flash.
+      (function () {
+        try {
+          var saved = JSON.parse(localStorage.getItem("studyflow:boot-theme") || "null");
+          var dark = saved ? saved.mode === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;
+          var root = document.documentElement;
+          if (dark) root.classList.add("dark");
+          if (saved && saved.bg) root.style.setProperty("--c-bg", saved.bg);
+          else if (dark) root.style.setProperty("--c-bg", "16 19 27");
+          root.style.colorScheme = dark ? "dark" : "light";
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
