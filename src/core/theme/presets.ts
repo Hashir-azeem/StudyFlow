@@ -1,0 +1,98 @@
+import type { ThemePreset } from "../types/theme";
+
+export const THEME_PRESETS: ThemePreset[] = [
+  {
+    id: "minimal-light",
+    label: "Minimal light",
+    mode: "light",
+    tokens: {
+      bg: "#F7F6F3",
+      bgSubtle: "#EFEDE8",
+      surface: "#FFFFFF",
+      border: "#E4E1DA",
+      text: "#1C1B19",
+      textMuted: "#6B6860",
+      accent: "#3D5A80",
+      accentFg: "#FFFFFF",
+      danger: "#C44536",
+      warning: "#C17F3A",
+      success: "#3D7A5A",
+    },
+  },
+  {
+    id: "minimal-dark",
+    label: "Minimal dark",
+    mode: "dark",
+    tokens: {
+      bg: "#121214",
+      bgSubtle: "#1A1A1E",
+      surface: "#1E1E24",
+      border: "#2C2C34",
+      text: "#F2F1EE",
+      textMuted: "#9A9892",
+      accent: "#8FA8C8",
+      accentFg: "#121214",
+      danger: "#F07167",
+      warning: "#E8B86D",
+      success: "#7BC9A0",
+    },
+  },
+  {
+    id: "pastel",
+    label: "Pastel",
+    mode: "light",
+    tokens: {
+      bg: "#FBF7FF",
+      bgSubtle: "#F3EAFB",
+      surface: "#FFFFFF",
+      border: "#E8D9F5",
+      text: "#3D2B4A",
+      textMuted: "#7A638C",
+      accent: "#C9A7EB",
+      accentFg: "#3D2B4A",
+      danger: "#E89AA8",
+      warning: "#F0C98A",
+      success: "#A8D5C2",
+    },
+  },
+  {
+    id: "synthwave",
+    label: "Synthwave",
+    mode: "dark",
+    tokens: {
+      bg: "#14081F",
+      bgSubtle: "#1E0F2E",
+      surface: "#26143A",
+      border: "#4B1E6A",
+      text: "#F5E9FF",
+      textMuted: "#B89AD4",
+      accent: "#FF4ECD",
+      accentFg: "#14081F",
+      danger: "#FF6B6B",
+      warning: "#FFD166",
+      success: "#2DE2E6",
+    },
+  },
+  {
+    id: "mono",
+    label: "Monochrome",
+    mode: "dark",
+    tokens: {
+      bg: "#0A0A0A",
+      bgSubtle: "#141414",
+      surface: "#1A1A1A",
+      border: "#2A2A2A",
+      text: "#F5F5F5",
+      textMuted: "#8A8A8A",
+      accent: "#FFFFFF",
+      accentFg: "#0A0A0A",
+      danger: "#D4D4D4",
+      warning: "#A3A3A3",
+      success: "#E5E5E5",
+    },
+  },
+];
+
+export function presetById(id: ThemePreset["id"]): ThemePreset {
+  return THEME_PRESETS.find((p) => p.id === id) ?? THEME_PRESETS[1];
+}

@@ -1,0 +1,52 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-sf-bg: var(--sf-bg);
+  --color-sf-bg-subtle: var(--sf-bg-subtle);
+  --color-sf-surface: var(--sf-surface);
+  --color-sf-border: var(--sf-border);
+  --color-sf-text: var(--sf-text);
+  --color-sf-muted: var(--sf-text-muted);
+  --color-sf-accent: var(--sf-accent);
+  --font-sans: "Segoe UI", system-ui, sans-serif;
+}
+
+:root {
+  --sf-bg: #121214;
+  --sf-bg-subtle: #1a1a1e;
+  --sf-surface: #1e1e24;
+  --sf-border: #2c2c34;
+  --sf-text: #f2f1ee;
+  --sf-text-muted: #9a9892;
+  --sf-accent: #8fa8c8;
+  --sf-accent-fg: #121214;
+  --sf-danger: #f07167;
+  --sf-warning: #e8b86d;
+  --sf-success: #7bc9a0;
+  --sf-course-accent: var(--sf-accent);
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--sf-bg);
+  color: var(--sf-text);
+}
+
+#root {
+  width: 100%;
+}
+
+[cmdk-group-heading] {
+  padding: 0.25rem 0.5rem;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--sf-text-muted);
+}
