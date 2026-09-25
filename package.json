@@ -10,7 +10,10 @@
     "preview": "vite preview",
     "typecheck": "tsc -b",
     "test": "vitest run",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "desktop:install": "tauri build --bundles nsis --config src-tauri/tauri.local.conf.json",
+    "release": "npm version patch -m \"Release v%s\" && git push --follow-tags",
+    "release:minor": "npm version minor -m \"Release v%s\" && git push --follow-tags"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.23",
@@ -18,7 +21,9 @@
     "@tauri-apps/plugin-dialog": "^2.0.0",
     "@tauri-apps/plugin-fs": "^2.0.0",
     "@tauri-apps/plugin-notification": "^2.0.0",
+    "@tauri-apps/plugin-process": "^2.0.0",
     "@tauri-apps/plugin-sql": "^2.0.0",
+    "@tauri-apps/plugin-updater": "^2.0.0",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
     "dexie": "^4.4.6",

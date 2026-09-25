@@ -14,6 +14,8 @@ npx tauri icon src-tauri/app-icon.png  # generates src-tauri/icons/* (needed onc
 npm run tauri dev                      # desktop app, SQLite storage
 ```
 
+To install StudyFlow as a normal desktop app with automatic updates, follow **DESKTOP.md**.
+
 Mobile: `npx tauri android init` / `npx tauri ios init`, then `npm run tauri android dev`.
 
 ## Structure
@@ -40,12 +42,14 @@ src/
     legacyMigration.ts  Converters from the original Cursor schema (tested)
     index.ts         Picks a backend at runtime (code-split)
   platform/
+    updater.ts       Check, download, install, relaunch (desktop only)
     notify.ts        System notifications (Tauri plugin or Web Notification API)
     backupFile.ts    Native save/open dialogs in Tauri, download/file picker in browser
   state/
     store.ts         Zustand store: optimistic writes, rollback on failure, undo
     hooks.ts         Memoized selectors + midnight-rollover clock
     useReminders.ts  Sends due reminders, remembers what was sent
+    updates.ts       Update status + background check every 6 hours
   theme/
     themes.ts        Daylight, Late night, Pastel, Synthwave, Monochrome
     ThemeProvider.tsx         Writes tokens to <html>, follows OS in "system" mode
@@ -56,10 +60,15 @@ src/
   lib/cn.ts        clsx + tailwind-merge
 src-tauri/
   src/lib.rs       Plugin registration + SQLite schema migrations
+                   (desktop adds single-instance, window-state, updater, process)
+  tauri.local.conf.json  Override for unsigned local installer builds
   src/main.rs, build.rs, Cargo.toml, tauri.conf.json
   capabilities/default.json
   app-icon.png     Source for `tauri icon`
 tests/core.test.ts
+.github/workflows/
+  release.yml      Tag v* → signed Windows installer + latest.json on GitHub Releases
+  ci.yml           Typecheck, test, and lint on every push
 ```
 
 ## How the key pieces work
@@ -102,3 +111,4 @@ tests/core.test.ts
 - Reminders fire while StudyFlow is open or minimised. Notifications that arrive with the app fully closed need OS-level scheduling, which differs per platform.
 - On Android, files picked through the system dialog can be content URIs; test backup restore on a device before relying on it.
 - The IndexedDB upgrade from the first version's schema is unit-tested at the converter level; open `npm run dev` once with an existing database to confirm the upgrade in a real browser.
+- The Windows installer isn't code-signed with a paid certificate, so SmartScreen warns on the first manual install. Automatic updates are verified with the Tauri signing key and don't trigger it.

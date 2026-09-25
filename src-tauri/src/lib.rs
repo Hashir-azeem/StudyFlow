@@ -1,3 +1,5 @@
+#[cfg(desktop)]
+use tauri::Manager;
 use tauri_plugin_sql::{Migration, MigrationKind};
 
 /// Schema migrations run natively, in order, inside a transaction, before the
@@ -52,7 +54,29 @@ fn migrations() -> Vec<Migration> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default();
+
+    #[cfg(desktop)]
+    {
+        builder = builder
+            // Must be registered first. A second launch (double-clicked shortcut,
+            // taskbar pin) focuses the running window instead of opening another
+            // copy that would write to the same database.
+            .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.unminimize();
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }))
+            // Reopens at the size and position you last left it.
+            .plugin(tauri_plugin_window_state::Builder::default().build())
+            .plugin(tauri_plugin_updater::Builder::new().build())
+            .plugin(tauri_plugin_process::init());
+    }
+
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_notification::init())

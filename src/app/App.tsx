@@ -14,6 +14,7 @@ import { TodayView } from "../features/today/TodayView";
 import { useClock } from "../state/hooks";
 import { useStore } from "../state/store";
 import { useReminders } from "../state/useReminders";
+import { useUpdateCheck } from "../state/updates";
 import { ThemeProvider } from "../theme/ThemeProvider";
 import { ROUTES } from "./routes";
 import { Shell } from "./Shell";
@@ -29,6 +30,7 @@ export function App() {
   useClock();
   usePaletteHotkey();
   useReminders();
+  useUpdateCheck();
 
   return (
     <ThemeProvider>

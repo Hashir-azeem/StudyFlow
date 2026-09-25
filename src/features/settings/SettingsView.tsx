@@ -13,6 +13,7 @@ import {
   type PermissionState,
 } from "../../platform/notify";
 import { useStore } from "../../state/store";
+import { useUpdates } from "../../state/updates";
 import { parseSnapshot } from "../../storage/snapshot";
 import { THEME_LIST } from "../../theme/themes";
 
@@ -316,6 +317,65 @@ function BackupSection() {
   );
 }
 
+function AboutSection() {
+  const status = useUpdates((s) => s.status);
+  const version = useUpdates((s) => s.version);
+  const available = useUpdates((s) => s.available);
+  const progress = useUpdates((s) => s.progress);
+  const error = useUpdates((s) => s.error);
+  const checkedAt = useUpdates((s) => s.checkedAt);
+  const check = useUpdates((s) => s.check);
+  const install = useUpdates((s) => s.install);
+
+  if (status === "unsupported") {
+    return (
+      <Section title="About">
+        <p className="text-sm text-muted">
+          You're running StudyFlow in a browser. Install the desktop app to get automatic updates.
+        </p>
+      </Section>
+    );
+  }
+
+  const line =
+    status === "checking"
+      ? "Checking for updates…"
+      : status === "current"
+        ? "You're on the latest version."
+        : status === "available" && available
+          ? `Version ${available.version} is available.`
+          : status === "installing"
+            ? progress !== null && progress < 1
+              ? `Downloading: ${Math.round(progress * 100)}%`
+              : "Installing. StudyFlow will restart."
+            : status === "error"
+              ? `Couldn't check for updates: ${error}`
+              : null;
+
+  return (
+    <Section title="About">
+      <Row
+        label={version ? `StudyFlow ${version}` : "StudyFlow"}
+        hint={checkedAt ? `Last checked ${new Date(checkedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : undefined}
+      >
+        {status === "available" ? (
+          <Button variant="primary" onClick={() => void install()}>Restart and update</Button>
+        ) : (
+          <Button onClick={() => void check()} disabled={status === "checking" || status === "installing"}>
+            Check for updates
+          </Button>
+        )}
+      </Row>
+      {line ? (
+        <p role="status" className={cx("mt-1 text-sm", status === "error" ? "text-danger" : "text-muted")}>{line}</p>
+      ) : null}
+      {status === "available" && available?.notes ? (
+        <p className="mt-2 whitespace-pre-line rounded-lg bg-surface-2 px-3 py-2 text-sm">{available.notes}</p>
+      ) : null}
+    </Section>
+  );
+}
+
 export function SettingsView() {
   const settings = useStore((s) => s.settings);
   const updateSettings = useStore((s) => s.updateSettings);
@@ -384,6 +444,7 @@ export function SettingsView() {
 
       <RemindersSection />
       <BackupSection />
+      <AboutSection />
     </div>
   );
 }

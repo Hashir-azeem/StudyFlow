@@ -5,6 +5,7 @@ import { useTracker } from "../state/hooks";
 import { useStore } from "../state/store";
 import { PALETTE_SHORTCUT } from "../features/command-palette/hotkey";
 import { NAV, ROUTES } from "./routes";
+import { UpdateBanner } from "./UpdateBanner";
 
 function PaletteButton({ compact }: { compact?: boolean }) {
   const setOpen = useStore((s) => s.setPaletteOpen);
@@ -67,6 +68,7 @@ export function Shell() {
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
+        <UpdateBanner />
         {degraded ? (
           <div role="alert" className="bg-warning/15 px-4 py-2 text-center text-sm text-warning">
             Your saved data couldn't be opened. Changes this session won't be kept.

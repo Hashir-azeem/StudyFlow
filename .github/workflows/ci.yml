@@ -1,0 +1,23 @@
+# Type-checks and tests every push and pull request. Runs on Windows because
+# package-lock.json is generated there (native build tools are per-OS).
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["v*"]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run lint

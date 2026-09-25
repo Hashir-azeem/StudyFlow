@@ -20,3 +20,18 @@ tauri-plugin-fs = "2"
 tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Desktop-only: these plugins have no iOS/Android implementation.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-single-instance = "2"
+tauri-plugin-window-state = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+
+[profile.release]
+# Smaller, faster installer: the app is small and doesn't need unwinding.
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
