@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
+import { AmbientBackground } from "../ambient/AmbientBackground";
 import { Button } from "../components/ui/Button";
 import { ToastHost } from "../components/ui/Toast";
 import { AssessmentDialog } from "../features/assessments/AssessmentDialog";
@@ -9,6 +10,7 @@ import { CommandPalette } from "../features/command-palette/CommandPalette";
 import { usePaletteHotkey } from "../features/command-palette/hotkey";
 import { CourseDialog } from "../features/courses/CourseDialog";
 import { CoursesView } from "../features/courses/CoursesView";
+import { OutlineImportDialog } from "../features/import/OutlineImportDialog";
 import { SettingsView } from "../features/settings/SettingsView";
 import { TodayView } from "../features/today/TodayView";
 import { useClock } from "../state/hooks";
@@ -34,6 +36,7 @@ export function App() {
 
   return (
     <ThemeProvider>
+      <AmbientBackground />
       {status === "loading" ? (
         <div className="grid h-full place-items-center text-sm text-muted" aria-busy="true">Loading your schedule…</div>
       ) : status === "error" ? (
@@ -57,6 +60,7 @@ export function App() {
           <CommandPalette />
           <CourseDialog />
           <AssessmentDialog />
+          <OutlineImportDialog />
           <ToastHost />
         </HashRouter>
       )}

@@ -1,0 +1,3232 @@
+From f6c2eb10cd92d20ed29a5fcbd1065e9d28f97219 Mon Sep 17 00:00:00 2001
+From: StudyFlow merge <merge@studyflow.local>
+Date: Fri, 25 Sep 2026 21:33:54 +0000
+Subject: [PATCH] Ambient particle themes and private course outline import
+
+- Snow, sakura, and ember backgrounds on a worker-driven canvas with
+  adaptive quality, reduced-motion support, and a contrast-safe layer opacity
+- Stronger muted text on every theme (7:1 light, 8.5:1 dark)
+- On-device outline import for PDF, DOCX, and text with a review step;
+  no upload, no storage of the file or its text
+
+Needs: npm install pdfjs-dist mammoth
+---
+ README.md                                     |   4 +-
+ docs/ambient-and-outline-import.md            |  62 ++++
+ src/ambient/AmbientBackground.tsx             |  72 ++++
+ src/ambient/ambient.worker.ts                 |  33 ++
+ src/ambient/driver.ts                         |  64 ++++
+ src/ambient/engine.ts                         | 266 ++++++++++++++
+ src/ambient/motion.ts                         |  21 ++
+ src/ambient/protocol.ts                       |   9 +
+ src/app/App.tsx                               |   4 +
+ src/app/Shell.tsx                             |   3 +-
+ src/core/ambient.ts                           | 252 +++++++++++++
+ src/core/outline/parseOutline.ts              | 331 +++++++++++++++++
+ src/core/outline/text.ts                      | 245 +++++++++++++
+ src/core/outline/types.ts                     |  47 +++
+ src/core/types.ts                             |  14 +
+ .../command-palette/CommandPalette.tsx        |  47 +++
+ src/features/courses/CourseDialog.tsx         |  15 +-
+ src/features/courses/CoursesView.tsx          |  14 +-
+ src/features/import/OutlineImportDialog.tsx   | 149 ++++++++
+ src/features/import/OutlineReview.tsx         | 345 ++++++++++++++++++
+ src/features/settings/SettingsView.tsx        | 103 +++++-
+ src/features/today/TodayView.tsx              |  10 +-
+ src/platform/outlineReader.ts                 | 206 +++++++++++
+ src/state/store.ts                            |  85 +++++
+ src/storage/snapshot.ts                       |  13 +-
+ src/styles/globals.css                        |   2 +-
+ src/theme/themes.ts                           |  14 +-
+ src/types/modules.d.ts                        |   2 +
+ tests/ambient.test.ts                         |  78 ++++
+ tests/outline.test.ts                         | 196 ++++++++++
+ vite.config.ts                                |   2 +
+ 31 files changed, 2689 insertions(+), 19 deletions(-)
+ create mode 100644 docs/ambient-and-outline-import.md
+ create mode 100644 src/ambient/AmbientBackground.tsx
+ create mode 100644 src/ambient/ambient.worker.ts
+ create mode 100644 src/ambient/driver.ts
+ create mode 100644 src/ambient/engine.ts
+ create mode 100644 src/ambient/motion.ts
+ create mode 100644 src/ambient/protocol.ts
+ create mode 100644 src/core/ambient.ts
+ create mode 100644 src/core/outline/parseOutline.ts
+ create mode 100644 src/core/outline/text.ts
+ create mode 100644 src/core/outline/types.ts
+ create mode 100644 src/features/import/OutlineImportDialog.tsx
+ create mode 100644 src/features/import/OutlineReview.tsx
+ create mode 100644 src/platform/outlineReader.ts
+ create mode 100644 src/types/modules.d.ts
+ create mode 100644 tests/ambient.test.ts
+ create mode 100644 tests/outline.test.ts
+
+diff --git a/README.md b/README.md
+index d850fae..87bfa31 100644
+--- a/README.md
++++ b/README.md
+@@ -8,7 +8,7 @@ See **AUDIT.md** for what was wrong with the first Cursor-generated version and
+ 
+ ```bash
+ rm -rf node_modules && npm install     # node_modules from another OS won't work
+-npm test                               # 40 unit tests
++npm test                               # unit tests (core, ambient, outline parser)
+ npm run dev                            # browser, IndexedDB storage
+ npx tauri icon src-tauri/app-icon.png  # generates src-tauri/icons/* (needed once)
+ npm run tauri dev                      # desktop app, SQLite storage
+@@ -16,6 +16,8 @@ npm run tauri dev                      # desktop app, SQLite storage
+ 
+ To install StudyFlow as a normal desktop app with automatic updates, follow **DESKTOP.md**.
+ 
++Ambient particle backgrounds and course-outline import are described in **docs/ambient-and-outline-import.md**.
++
+ Mobile: `npx tauri android init` / `npx tauri ios init`, then `npm run tauri android dev`.
+ 
+ ## Structure
+diff --git a/docs/ambient-and-outline-import.md b/docs/ambient-and-outline-import.md
+new file mode 100644
+index 0000000..bb30db8
+--- /dev/null
++++ b/docs/ambient-and-outline-import.md
+@@ -0,0 +1,62 @@
++# Ambient themes and course outline import
++
++## Architecture at a glance
++
++```
++src/core/ambient.ts            Pure: particle physics, palettes, WCAG-safe layer opacity
++src/ambient/engine.ts          Canvas renderer: sprites, frame loop, adaptive thinning
++src/ambient/ambient.worker.ts  Runs the engine off the main thread (OffscreenCanvas)
++src/ambient/driver.ts          Picks worker or main thread; one interface for both
++src/ambient/motion.ts          Reduced-motion + user preference → animate or still
++src/ambient/AmbientBackground.tsx  Mounts the layer; reacts to settings and theme
++
++src/core/outline/text.ts         Pure recognisers: days, times, dates, weights, rooms
++src/core/outline/parseOutline.ts Pure parser: text → ParsedOutline
++src/platform/outlineReader.ts    File → text (pdf.js / mammoth / TextDecoder) → parse, in memory
++src/features/import/OutlineImportDialog.tsx  Pick → read → review flow
++src/features/import/OutlineReview.tsx        Edit and approve before anything is saved
++src/state/store.ts  applyOutlineImport()     Saves the approved plan as one change, with Undo
++```
++
++**State.** Ambient preferences live in `Settings.ambient` (effect, motion, intensity) and are persisted with the rest of the settings. Everything else about the effect is derived: the palette and safe opacity come from the resolved theme, and motion from the preference plus the OS reduce-motion setting. For the outline import, nothing is persisted until approval. The dialog holds only the structured parse result in component state and drops it on close; the store receives a plain `OutlineImportPlan` (course, meetings, assessments).
++
++## Ambient particles
++
++**Performance.**
++- In WebView2 (Windows), Chromium, Firefox, and Safari 16.4+, the canvas is handed to a Web Worker with `transferControlToOffscreen`, so simulation and drawing never block the UI thread. Elsewhere the same engine runs on the main thread.
++- Each particle shape is drawn once per color into a sprite. A frame is then only `drawImage` calls.
++- The engine measures its own work time per frame. When the average passes the budget (4 ms on the main thread, 8 ms in a worker), it removes 20% of the particles, repeating down to a quarter of the original count.
++- Rendering resolution is capped at 1.5× device pixels, since soft particles gain nothing from more.
++- The loop pauses while the window is hidden. After sleep, a clamped time step stops particles from jumping.
++
++**Accessibility.**
++- **Text contrast.** Particles draw into one layer whose CSS opacity is capped. Every canvas pixel has alpha ≤ 1, so the worst case behind any text is `mix(particleColor, background, opacity)`. `safeLayerOpacity` picks the largest opacity for which body and muted text keep 4.5:1 against that worst case, for every palette color and every blend of two. `tests/ambient.test.ts` checks this for every theme and effect. Cards and dialogs are opaque, so text on them is never affected.
++- **Muted text colour.** To give the effect room, muted text was raised to 7:1 on light themes and 8.5:1 on dark ones. The resulting layer opacity is 21–51% depending on theme and effect.
++- **Motion.** WCAG 2.2.2 (Pause, Stop, Hide) is met by the Motion control and the command palette's "Pause ambient motion". The "Automatic" setting follows `prefers-reduced-motion`, and "Still" shows a single static frame.
++- **Screen readers and pointer.** The layer is `aria-hidden` and `pointer-events: none`.
++
++## Outline import: privacy model
++
++1. **On device.** The file is read from the browser's `File` into memory. The code makes no network requests, and in the desktop app the Tauri CSP (`connect-src 'self' ipc:`) blocks outbound connections regardless.
++2. **Nothing persisted.** The reader never touches IndexedDB, SQLite, localStorage, the file system, or logs. pdf.js runs in a worker created for that one document and destroyed afterwards.
++3. **Scoped lifetime.** Bytes and extracted text live only inside `readOutline()`. It returns the structured `ParsedOutline`, and the byte buffer is zeroed on the way out. The only document text that survives is the single matched line per item (`source`), shown during review so the student can check it. It's never saved; imported assessments get empty notes.
++4. **Approval gate.** Nothing is written until the student presses Create/Add on the review screen. The write is one store change with Undo.
++
++**Limit worth stating plainly.** JavaScript can't overwrite strings in place. The extracted text is released for garbage collection, not wiped. It's unreachable once `readOutline()` returns.
++
++`tests/outline.test.ts` includes a check that a sentence from the document which isn't an assessment or class time (a student number and address) doesn't appear anywhere in the returned data.
++
++## Why the parser is rule-based, not an LLM
++
++A language model would handle unusual layouts better. But it means sending the document's text off the device, which breaks guarantee 1, and it needs a server to hold the API key, since a key shipped inside the desktop app is public. The parser is a pure `text → ParsedOutline` function, so an opt-in model-based extractor could be added behind the same review screen later. It should be clearly labelled as sending the text out, and use a provider with contractual zero data retention.
++
++What the rules handle today:
++- **Class times:** day names and registrar shorthand (MWF, TTh, TR), am/pm inference ("11-12:20pm", "2-3:50pm"), and rooms.
++- **Assessments:** grading tables and schedules (merged by name, so the midterm's weight and date can come from different sections), "10 x 1%" expansion, "Week 7" dates resolved from the term start, TBA finals, and table cells split across lines (typical of Word documents).
++- **Skipped on purpose:** late-penalty and policy sentences, and office hours.
++
++**Formats:**
++- **Supported:** PDF with a text layer, .docx, .txt, and .md.
++- **Not supported:**
++  - Scanned PDFs, which need OCR. The student gets a clear message.
++  - Old .doc files. The student is asked to save as .docx or PDF.
+diff --git a/src/ambient/AmbientBackground.tsx b/src/ambient/AmbientBackground.tsx
+new file mode 100644
+index 0000000..7b3fb96
+--- /dev/null
++++ b/src/ambient/AmbientBackground.tsx
+@@ -0,0 +1,72 @@
++import { useEffect, useMemo, useRef } from "react";
++import { ambientPalette } from "../core/ambient";
++import { useStore } from "../state/store";
++import { useResolvedTheme } from "../theme/useResolvedTheme";
++import { createAmbientDriver, type AmbientDriver } from "./driver";
++import { useAmbientMotion } from "./motion";
++
++// Soft particles don't need full retina resolution; capping saves fill-rate on 4K screens.
++const dprNow = () => Math.min(window.devicePixelRatio || 1, 1.5);
++
++/**
++ * Full-screen particle layer behind the app. Decorative only: hidden from
++ * assistive tech, ignores the pointer, and capped in opacity so text contrast
++ * holds (see core/ambient.ts). Pauses while the window is hidden and renders
++ * a single still frame when motion is off.
++ */
++export function AmbientBackground() {
++  const effect = useStore((s) => s.settings.ambient.effect);
++  const intensity = useStore((s) => s.settings.ambient.intensity);
++  const motion = useAmbientMotion();
++  const theme = useResolvedTheme();
++  const hostRef = useRef<HTMLDivElement>(null);
++  const driverRef = useRef<AmbientDriver | null>(null);
++  const enabled = effect !== "none";
++
++  const palette = useMemo(() => (effect === "none" ? null : ambientPalette(effect, theme)), [effect, theme]);
++
++  // Create the canvas imperatively: an OffscreenCanvas transfer can happen only
++  // once per element, and StrictMode mounts effects twice in development.
++  useEffect(() => {
++    const host = hostRef.current;
++    if (!enabled || !host) return;
++    const canvas = document.createElement("canvas");
++    canvas.style.cssText = "position:absolute;inset:0;width:100%;height:100%;display:block";
++    host.append(canvas);
++    const driver = createAmbientDriver(canvas, window.innerWidth, window.innerHeight, dprNow());
++    driverRef.current = driver;
++
++    let raf = 0;
++    const onResize = () => {
++      cancelAnimationFrame(raf);
++      raf = requestAnimationFrame(() => driver.resize(window.innerWidth, window.innerHeight, dprNow()));
++    };
++    const onVisibility = () => driver.setVisible(document.visibilityState === "visible");
++    window.addEventListener("resize", onResize);
++    document.addEventListener("visibilitychange", onVisibility);
++
++    return () => {
++      cancelAnimationFrame(raf);
++      window.removeEventListener("resize", onResize);
++      document.removeEventListener("visibilitychange", onVisibility);
++      driver.destroy();
++      canvas.remove();
++      driverRef.current = null;
++    };
++  }, [enabled]);
++
++  useEffect(() => {
++    if (effect === "none" || !palette) return;
++    driverRef.current?.configure({ effect, intensity, motion, colors: palette.colors });
++  }, [effect, intensity, motion, palette]);
++
++  if (!enabled || !palette) return null;
++  return (
++    <div
++      ref={hostRef}
++      aria-hidden="true"
++      className="pointer-events-none fixed inset-0 z-0 overflow-hidden transition-opacity duration-500"
++      style={{ opacity: palette.layerOpacity }}
++    />
++  );
++}
+diff --git a/src/ambient/ambient.worker.ts b/src/ambient/ambient.worker.ts
+new file mode 100644
+index 0000000..2dfb69c
+--- /dev/null
++++ b/src/ambient/ambient.worker.ts
+@@ -0,0 +1,33 @@
++/**
++ * Runs the particle simulation and drawing off the main thread, on an
++ * OffscreenCanvas transferred from the page. The UI thread only posts small
++ * config messages, so scrolling, typing, and dialogs never compete with it.
++ */
++import { AmbientEngine } from "./engine";
++import type { AmbientMessage } from "./protocol";
++
++let engine: AmbientEngine | null = null;
++
++self.onmessage = (event: MessageEvent<AmbientMessage>) => {
++  const msg = event.data;
++  switch (msg.type) {
++    case "init":
++      engine = new AmbientEngine(msg.canvas, undefined, AmbientEngine.workerBudget());
++      engine.resize(msg.width, msg.height, msg.dpr);
++      break;
++    case "config":
++      engine?.configure(msg.config);
++      break;
++    case "resize":
++      engine?.resize(msg.width, msg.height, msg.dpr);
++      break;
++    case "visible":
++      engine?.setVisible(msg.visible);
++      break;
++    case "destroy":
++      engine?.destroy();
++      engine = null;
++      self.close();
++      break;
++  }
++};
+diff --git a/src/ambient/driver.ts b/src/ambient/driver.ts
+new file mode 100644
+index 0000000..d6034bb
+--- /dev/null
++++ b/src/ambient/driver.ts
+@@ -0,0 +1,64 @@
++import { AmbientEngine, type EngineConfig } from "./engine";
++import type { AmbientMessage } from "./protocol";
++
++export interface AmbientDriver {
++  readonly mode: "worker" | "main";
++  configure(config: EngineConfig): void;
++  resize(width: number, height: number, dpr: number): void;
++  setVisible(visible: boolean): void;
++  destroy(): void;
++}
++
++/**
++ * Prefer a Web Worker with OffscreenCanvas (WebView2 on Windows, Chromium,
++ * Firefox, Safari 16.4+). Fall back to the main thread where either is missing;
++ * the engine's frame budget keeps that path light too.
++ */
++const NOOP_DRIVER: AmbientDriver = {
++  mode: "main",
++  configure: () => {},
++  resize: () => {},
++  setVisible: () => {},
++  destroy: () => {},
++};
++
++export function createAmbientDriver(canvas: HTMLCanvasElement, width: number, height: number, dpr: number): AmbientDriver {
++  const canUseWorker = typeof Worker !== "undefined" && typeof canvas.transferControlToOffscreen === "function";
++  if (canUseWorker) {
++    let worker: Worker | null = null;
++    let transferred = false;
++    try {
++      worker = new Worker(new URL("./ambient.worker.ts", import.meta.url), { type: "module", name: "studyflow-ambient" });
++      const offscreen = canvas.transferControlToOffscreen();
++      transferred = true;
++      const post = (msg: AmbientMessage, transfer: Transferable[] = []) => worker?.postMessage(msg, transfer);
++      post({ type: "init", canvas: offscreen, width, height, dpr }, [offscreen]);
++      return {
++        mode: "worker",
++        configure: (config) => post({ type: "config", config }),
++        resize: (w, h, d) => post({ type: "resize", width: w, height: h, dpr: d }),
++        setVisible: (visible) => post({ type: "visible", visible }),
++        destroy: () => {
++          post({ type: "destroy" });
++          worker?.terminate();
++          worker = null;
++        },
++      };
++    } catch (err) {
++      worker?.terminate();
++      console.warn("[ambient] worker unavailable:", err);
++      // A transferred canvas can't be drawn on from here any more: show nothing rather than fail.
++      if (transferred) return NOOP_DRIVER;
++    }
++  }
++
++  const engine = new AmbientEngine(canvas);
++  engine.resize(width, height, dpr);
++  return {
++    mode: "main",
++    configure: (config) => engine.configure(config),
++    resize: (w, h, d) => engine.resize(w, h, d),
++    setVisible: (visible) => engine.setVisible(visible),
++    destroy: () => engine.destroy(),
++  };
++}
+diff --git a/src/ambient/engine.ts b/src/ambient/engine.ts
+new file mode 100644
+index 0000000..71a0aca
+--- /dev/null
++++ b/src/ambient/engine.ts
+@@ -0,0 +1,266 @@
++import {
++  drawAlpha,
++  particleCount,
++  spawn,
++  step,
++  tumble,
++  MIN_PARTICLES,
++  type ActiveEffect,
++  type Particle,
++} from "../core/ambient";
++import type { RGB } from "../core/colors";
++import type { AmbientIntensity } from "../core/types";
++
++type AnyCanvas = HTMLCanvasElement | OffscreenCanvas;
++type Ctx2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
++
++export interface EngineConfig {
++  effect: ActiveEffect;
++  intensity: AmbientIntensity;
++  motion: boolean;
++  colors: RGB[];
++}
++
++/** requestAnimationFrame where available (main thread, Chromium workers), else a 60 Hz timer. */
++export type Scheduler = {
++  request(cb: (now: number) => void): number;
++  cancel(id: number): void;
++};
++
++export function defaultScheduler(): Scheduler {
++  const g = globalThis as unknown as {
++    requestAnimationFrame?: (cb: (now: number) => void) => number;
++    cancelAnimationFrame?: (id: number) => void;
++  };
++  if (typeof g.requestAnimationFrame === "function" && typeof g.cancelAnimationFrame === "function") {
++    return { request: (cb) => g.requestAnimationFrame!(cb), cancel: (id) => g.cancelAnimationFrame!(id) };
++  }
++  return {
++    request: (cb) => setTimeout(() => cb(performance.now()), 1000 / 60) as unknown as number,
++    cancel: (id) => clearTimeout(id),
++  };
++}
++
++function makeCanvas(size: number): AnyCanvas {
++  if (typeof OffscreenCanvas !== "undefined") return new OffscreenCanvas(size, size);
++  const c = document.createElement("canvas");
++  c.width = size;
++  c.height = size;
++  return c;
++}
++
++const rgba = ({ r, g, b }: RGB, a: number) => `rgba(${r | 0}, ${g | 0}, ${b | 0}, ${a})`;
++
++/**
++ * Draw each particle shape once per palette color. Frames then only call
++ * drawImage, which is far cheaper than building gradients and paths per particle.
++ */
++function buildSprites(effect: ActiveEffect, colors: RGB[]): AnyCanvas[] {
++  return colors.map((color) => {
++    const size = effect === "sakura" ? 64 : effect === "embers" ? 64 : 32;
++    const canvas = makeCanvas(size);
++    const ctx = canvas.getContext("2d") as Ctx2D | null;
++    if (!ctx) return canvas;
++    const c = size / 2;
++    if (effect === "snow") {
++      const g = ctx.createRadialGradient(c, c, 0, c, c, c);
++      g.addColorStop(0, rgba(color, 1));
++      g.addColorStop(0.45, rgba(color, 0.85));
++      g.addColorStop(1, rgba(color, 0));
++      ctx.fillStyle = g;
++      ctx.fillRect(0, 0, size, size);
++    } else if (effect === "embers") {
++      // Hot core plus a soft glow; alpha stays ≤ 1, so the layer opacity cap still holds.
++      const g = ctx.createRadialGradient(c, c, 0, c, c, c);
++      g.addColorStop(0, rgba({ r: 255, g: 240, b: 200 }, 1));
++      g.addColorStop(0.12, rgba(color, 1));
++      g.addColorStop(0.35, rgba(color, 0.35));
++      g.addColorStop(1, rgba(color, 0));
++      ctx.fillStyle = g;
++      ctx.fillRect(0, 0, size, size);
++    } else {
++      // Sakura petal: two curves meeting at a notched tip.
++      ctx.translate(c, c);
++      const s = size * 0.42;
++      const grad = ctx.createLinearGradient(-s, 0, s, 0);
++      grad.addColorStop(0, rgba(color, 1));
++      grad.addColorStop(1, rgba({ r: Math.min(255, color.r + 20), g: Math.min(255, color.g + 30), b: Math.min(255, color.b + 30) }, 1));
++      ctx.fillStyle = grad;
++      ctx.beginPath();
++      ctx.moveTo(-s, 0);
++      ctx.bezierCurveTo(-s * 0.4, -s * 0.9, s * 0.6, -s * 0.7, s, -s * 0.12);
++      ctx.lineTo(s * 0.78, 0);
++      ctx.lineTo(s, s * 0.12);
++      ctx.bezierCurveTo(s * 0.6, s * 0.7, -s * 0.4, s * 0.9, -s, 0);
++      ctx.fill();
++    }
++    return canvas;
++  });
++}
++
++/** Rendered size (px) relative to the particle's `size`. */
++const DRAW_SCALE: Record<ActiveEffect, number> = { snow: 2.6, sakura: 1.6, embers: 5 };
++
++/** Main-thread work budget per frame before the engine thins particles. Workers get more room. */
++const BUDGET_MS = { main: 4, worker: 8 };
++
++export class AmbientEngine {
++  private ctx: Ctx2D | null;
++  private particles: Particle[] = [];
++  private sprites: AnyCanvas[] = [];
++  private config: EngineConfig | null = null;
++  private width = 0;
++  private height = 0;
++  private dpr = 1;
++  private visible = true;
++  private frameId: number | null = null;
++  private last = 0;
++  private t = 0;
++  private costEma = 0;
++  /** Adaptive cap, lowered when frames run over budget. */
++  private capFactor = 1;
++  private readonly rng = Math.random;
++  private readonly canvas: AnyCanvas;
++  private readonly scheduler: Scheduler;
++  private readonly budgetMs: number;
++
++  constructor(canvas: AnyCanvas, scheduler: Scheduler = defaultScheduler(), budgetMs: number = BUDGET_MS.main) {
++    this.canvas = canvas;
++    this.scheduler = scheduler;
++    this.budgetMs = budgetMs;
++    this.ctx = canvas.getContext("2d", { alpha: true }) as Ctx2D | null;
++  }
++
++  static workerBudget(): number {
++    return BUDGET_MS.worker;
++  }
++
++  configure(next: EngineConfig): void {
++    const prev = this.config;
++    this.config = next;
++    const effectChanged = !prev || prev.effect !== next.effect;
++    if (effectChanged || prev.colors !== next.colors) this.sprites = buildSprites(next.effect, next.colors);
++    if (effectChanged) {
++      this.particles = [];
++      this.capFactor = 1;
++    }
++    this.fill(effectChanged);
++    this.restart();
++  }
++
++  resize(width: number, height: number, dpr: number): void {
++    this.width = Math.max(1, Math.round(width));
++    this.height = Math.max(1, Math.round(height));
++    this.dpr = dpr;
++    this.canvas.width = Math.round(this.width * dpr);
++    this.canvas.height = Math.round(this.height * dpr);
++    this.fill(false);
++    this.restart();
++  }
++
++  setVisible(visible: boolean): void {
++    this.visible = visible;
++    this.restart();
++  }
++
++  destroy(): void {
++    this.stop();
++    this.particles = [];
++    this.sprites = [];
++    this.ctx?.clearRect(0, 0, this.canvas.width, this.canvas.height);
++  }
++
++  /** Match the particle count to viewport, intensity, and adaptive cap. */
++  private fill(scatterAll: boolean): void {
++    const cfg = this.config;
++    if (!cfg || this.width <= 1) return;
++    const target = Math.max(
++      MIN_PARTICLES,
++      Math.round(particleCount(cfg.effect, this.width, this.height, cfg.intensity) * this.capFactor),
++    );
++    if (this.particles.length > target) this.particles.length = target;
++    while (this.particles.length < target) {
++      this.particles.push(spawn(cfg.effect, this.width, this.height, this.rng, cfg.colors.length, true));
++    }
++    if (scatterAll) {
++      for (let i = 0; i < this.particles.length; i++) {
++        this.particles[i] = spawn(cfg.effect, this.width, this.height, this.rng, cfg.colors.length, true);
++      }
++    }
++  }
++
++  private restart(): void {
++    this.stop();
++    if (!this.config || this.width <= 1) return;
++    this.draw();
++    if (this.config.motion && this.visible) {
++      this.last = performance.now();
++      this.frameId = this.scheduler.request(this.tick);
++    }
++  }
++
++  private stop(): void {
++    if (this.frameId !== null) this.scheduler.cancel(this.frameId);
++    this.frameId = null;
++  }
++
++  private tick = (now: number): void => {
++    const cfg = this.config;
++    if (!cfg) return;
++    const started = performance.now();
++    // Clamp dt so a long pause (sleep, hidden tab) doesn't teleport particles.
++    const dt = Math.min(0.05, Math.max(0, (now - this.last) / 1000));
++    this.last = now;
++    this.t += dt;
++    for (let i = 0; i < this.particles.length; i++) {
++      const p = this.particles[i]!;
++      if (!step(cfg.effect, p, dt, this.t, this.width, this.height)) {
++        this.particles[i] = spawn(cfg.effect, this.width, this.height, this.rng, cfg.colors.length, false);
++      }
++    }
++    this.draw();
++    this.adapt(performance.now() - started);
++    this.frameId = this.scheduler.request(this.tick);
++  };
++
++  /** Thin the particle count by 20% whenever average work time exceeds the budget. */
++  private adapt(cost: number): void {
++    this.costEma = this.costEma * 0.92 + cost * 0.08;
++    if (this.costEma > this.budgetMs && this.capFactor > 0.25) {
++      this.capFactor *= 0.8;
++      this.costEma = this.budgetMs * 0.75;
++      this.fill(false);
++    }
++  }
++
++  private draw(): void {
++    const ctx = this.ctx;
++    const cfg = this.config;
++    if (!ctx || !cfg) return;
++    const { dpr, width, height, t } = this;
++    ctx.setTransform(1, 0, 0, 1, 0, 0);
++    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
++    const scale = DRAW_SCALE[cfg.effect];
++
++    for (const p of this.particles) {
++      const alpha = drawAlpha(cfg.effect, p, t, height);
++      if (alpha <= 0.01 || p.x < -60 || p.x > width + 60) continue;
++      const sprite = this.sprites[p.color];
++      if (!sprite) continue;
++      const size = p.size * scale;
++      ctx.globalAlpha = alpha;
++      if (cfg.effect === "sakura") {
++        const c = Math.cos(p.rot);
++        const s = Math.sin(p.rot);
++        // Squash one axis as the petal flips; keep a sliver so it never vanishes.
++        const f = Math.max(0.18, Math.abs(tumble(p, t)));
++        ctx.setTransform(dpr * c, dpr * s, -dpr * s * f, dpr * c * f, dpr * p.x, dpr * p.y);
++        ctx.drawImage(sprite, -size / 2, -size / 2, size, size);
++      } else {
++        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
++        ctx.drawImage(sprite, p.x - size / 2, p.y - size / 2, size, size);
++      }
++    }
++    ctx.globalAlpha = 1;
++  }
++}
+diff --git a/src/ambient/motion.ts b/src/ambient/motion.ts
+new file mode 100644
+index 0000000..0238bdf
+--- /dev/null
++++ b/src/ambient/motion.ts
+@@ -0,0 +1,21 @@
++import { useSyncExternalStore } from "react";
++import { useStore } from "../state/store";
++
++const REDUCED = "(prefers-reduced-motion: reduce)";
++const subscribeReduced = (cb: () => void) => {
++  const mql = window.matchMedia(REDUCED);
++  mql.addEventListener("change", cb);
++  return () => mql.removeEventListener("change", cb);
++};
++
++/** True when the OS asks apps to minimise motion. */
++export function usePrefersReducedMotion(): boolean {
++  return useSyncExternalStore(subscribeReduced, () => window.matchMedia(REDUCED).matches, () => false);
++}
++
++/** Resolved motion: the user's choice, with "auto" deferring to the OS setting. */
++export function useAmbientMotion(): boolean {
++  const motion = useStore((s) => s.settings.ambient.motion);
++  const reduced = usePrefersReducedMotion();
++  return motion === "on" || (motion === "auto" && !reduced);
++}
+diff --git a/src/ambient/protocol.ts b/src/ambient/protocol.ts
+new file mode 100644
+index 0000000..6f4c331
+--- /dev/null
++++ b/src/ambient/protocol.ts
+@@ -0,0 +1,9 @@
++import type { EngineConfig } from "./engine";
++
++/** Messages from the main thread to the ambient worker. */
++export type AmbientMessage =
++  | { type: "init"; canvas: OffscreenCanvas; width: number; height: number; dpr: number }
++  | { type: "config"; config: EngineConfig }
++  | { type: "resize"; width: number; height: number; dpr: number }
++  | { type: "visible"; visible: boolean }
++  | { type: "destroy" };
+diff --git a/src/app/App.tsx b/src/app/App.tsx
+index 05557fe..54d9905 100644
+--- a/src/app/App.tsx
++++ b/src/app/App.tsx
+@@ -1,5 +1,6 @@
+ import { useEffect } from "react";
+ import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
++import { AmbientBackground } from "../ambient/AmbientBackground";
+ import { Button } from "../components/ui/Button";
+ import { ToastHost } from "../components/ui/Toast";
+ import { AssessmentDialog } from "../features/assessments/AssessmentDialog";
+@@ -9,6 +10,7 @@ import { CommandPalette } from "../features/command-palette/CommandPalette";
+ import { usePaletteHotkey } from "../features/command-palette/hotkey";
+ import { CourseDialog } from "../features/courses/CourseDialog";
+ import { CoursesView } from "../features/courses/CoursesView";
++import { OutlineImportDialog } from "../features/import/OutlineImportDialog";
+ import { SettingsView } from "../features/settings/SettingsView";
+ import { TodayView } from "../features/today/TodayView";
+ import { useClock } from "../state/hooks";
+@@ -34,6 +36,7 @@ export function App() {
+ 
+   return (
+     <ThemeProvider>
++      <AmbientBackground />
+       {status === "loading" ? (
+         <div className="grid h-full place-items-center text-sm text-muted" aria-busy="true">Loading your schedule…</div>
+       ) : status === "error" ? (
+@@ -57,6 +60,7 @@ export function App() {
+           <CommandPalette />
+           <CourseDialog />
+           <AssessmentDialog />
++          <OutlineImportDialog />
+           <ToastHost />
+         </HashRouter>
+       )}
+diff --git a/src/app/Shell.tsx b/src/app/Shell.tsx
+index 628bdb5..5c58684 100644
+--- a/src/app/Shell.tsx
++++ b/src/app/Shell.tsx
+@@ -40,7 +40,8 @@ export function Shell() {
+   const todayCount = overdue.length + dueToday.length;
+ 
+   return (
+-    <div className="flex h-full">
++    // relative z-10 keeps the app above the ambient particle layer.
++    <div className="relative z-10 flex h-full">
+       <aside className="hidden w-60 shrink-0 flex-col gap-4 border-r border-border bg-surface p-4 md:flex">
+         <div className="px-2 text-lg font-bold tracking-tight">StudyFlow</div>
+         <PaletteButton />
+diff --git a/src/core/ambient.ts b/src/core/ambient.ts
+new file mode 100644
+index 0000000..b950f38
+--- /dev/null
++++ b/src/core/ambient.ts
+@@ -0,0 +1,252 @@
++import { channelsToRgb, contrastRatio, mix, type RGB } from "./colors";
++import type { AmbientEffect, AmbientIntensity, Theme } from "./types";
++
++/**
++ * Ambient particle effects, framework-free so the same code runs on the main
++ * thread, inside a Web Worker, and in unit tests.
++ *
++ * Accessibility model
++ * -------------------
++ * Particles are drawn into one canvas layer whose CSS opacity is capped at
++ * `layerOpacity`. Whatever the particles do (overlap, glow, flicker), every
++ * canvas pixel has alpha ≤ 1, so what the eye sees behind any text is at most
++ *   mix(particleColor, pageBackground, layerOpacity).
++ * `layerOpacity` is the largest value for which body text AND muted text
++ * still reach WCAG AA 4.5:1 against that worst case, for every particle color
++ * and every blend of two of them. Cards and dialogs are opaque, so text on
++ * them is never affected at all.
++ */
++
++export type ActiveEffect = Exclude<AmbientEffect, "none">;
++
++export interface Particle {
++  x: number;
++  y: number;
++  vx: number;
++  vy: number;
++  size: number;
++  rot: number;
++  /** Rotation speed (sakura). */
++  vr: number;
++  /** Base opacity before fades and flicker, 0–1. */
++  alpha: number;
++  /** Random phase so particles don't move in lockstep. */
++  phase: number;
++  /** Sway / wander amplitude in px. */
++  amp: number;
++  /** Sway / flicker / tumble frequency in rad/s. */
++  freq: number;
++  /** Index into the palette. */
++  color: number;
++  /** Seconds alive, and lifetime (embers only). */
++  life: number;
++  maxLife: number;
++}
++
++export type Rng = () => number;
++
++/** Small, fast, seedable PRNG (mulberry32) so tests are deterministic. */
++export function seededRng(seed: number): Rng {
++  let a = seed >>> 0;
++  return () => {
++    a = (a + 0x6d2b79f5) >>> 0;
++    let t = a;
++    t = Math.imul(t ^ (t >>> 15), t | 1);
++    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
++    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
++  };
++}
++
++const between = (rng: Rng, lo: number, hi: number) => lo + rng() * (hi - lo);
++
++/* ------------------------------------------------------------------ colors */
++
++const PALETTES: Record<ActiveEffect, { dark: RGB[]; light: RGB[] }> = {
++  snow: {
++    dark: [{ r: 255, g: 255, b: 255 }, { r: 222, g: 233, b: 255 }],
++    // White is invisible on light pages; a cool slate reads as "snow" there.
++    light: [{ r: 148, g: 163, b: 184 }, { r: 125, g: 146, b: 180 }],
++  },
++  sakura: {
++    dark: [{ r: 255, g: 183, b: 197 }, { r: 255, g: 209, b: 220 }, { r: 244, g: 143, b: 177 }],
++    light: [{ r: 236, g: 112, b: 153 }, { r: 244, g: 143, b: 177 }, { r: 219, g: 112, b: 147 }],
++  },
++  embers: {
++    dark: [{ r: 255, g: 150, b: 60 }, { r: 255, g: 110, b: 40 }, { r: 255, g: 196, b: 90 }],
++    light: [{ r: 234, g: 88, b: 12 }, { r: 220, g: 60, b: 20 }, { r: 245, g: 130, b: 30 }],
++  },
++};
++
++/** Upper bound regardless of contrast headroom: ambience, not decoration overload. */
++const CEILING: Record<ActiveEffect, number> = { snow: 0.9, sakura: 0.85, embers: 0.9 };
++const MIN_TEXT_CONTRAST = 4.5;
++
++function midpoint(a: RGB, b: RGB): RGB {
++  return { r: (a.r + b.r) / 2, g: (a.g + b.g) / 2, b: (a.b + b.b) / 2 };
++}
++
++/**
++ * Largest layer opacity (0.01 steps) such that, for every opacity from 0 up to
++ * it, text and muted text keep ≥ 4.5:1 over the particle colors (and blends of
++ * any two). Scanning upward, not bisecting, because contrast isn't guaranteed
++ * to change monotonically with alpha.
++ */
++export function safeLayerOpacity(colors: RGB[], theme: Theme, ceiling = 1): number {
++  const bg = channelsToRgb(theme.tokens.bg);
++  const inks = [channelsToRgb(theme.tokens.text), channelsToRgb(theme.tokens.muted)];
++  const samples = [...colors];
++  for (let i = 0; i < colors.length; i++) {
++    for (let j = i + 1; j < colors.length; j++) samples.push(midpoint(colors[i]!, colors[j]!));
++  }
++  const ok = (alpha: number) =>
++    samples.every((c) => {
++      const behind = mix(c, bg, alpha);
++      return inks.every((ink) => contrastRatio(ink, behind) >= MIN_TEXT_CONTRAST);
++    });
++  let safe = 0;
++  for (let a = 0.01; a <= ceiling + 1e-9; a += 0.01) {
++    if (!ok(a)) break;
++    safe = a;
++  }
++  return Math.round(safe * 100) / 100;
++}
++
++export interface AmbientPalette {
++  colors: RGB[];
++  /** CSS opacity for the whole particle layer. */
++  layerOpacity: number;
++}
++
++export function ambientPalette(effect: ActiveEffect, theme: Theme): AmbientPalette {
++  const colors = PALETTES[effect][theme.mode];
++  return { colors, layerOpacity: safeLayerOpacity(colors, theme, CEILING[effect]) };
++}
++
++/* ----------------------------------------------------------------- density */
++
++const DENSITY: Record<AmbientIntensity, number> = { 1: 0.35, 2: 0.65, 3: 1, 4: 1.35, 5: 1.7 };
++/** Particles per 10,000 px² of viewport at intensity 3. */
++const RATE: Record<ActiveEffect, number> = { snow: 0.55, sakura: 0.2, embers: 0.28 };
++export const MAX_PARTICLES = 360;
++export const MIN_PARTICLES = 8;
++
++export function particleCount(effect: ActiveEffect, width: number, height: number, intensity: AmbientIntensity): number {
++  const n = Math.round(((width * height) / 10_000) * RATE[effect] * DENSITY[intensity]);
++  return Math.max(MIN_PARTICLES, Math.min(MAX_PARTICLES, n));
++}
++
++/* -------------------------------------------------------------- simulation */
++
++/**
++ * Create a particle. `scatter` places it anywhere on screen (first frame and
++ * still mode); otherwise it enters from the edge its effect flows from.
++ */
++export function spawn(effect: ActiveEffect, w: number, h: number, rng: Rng, paletteSize: number, scatter: boolean): Particle {
++  const base: Particle = {
++    x: rng() * w,
++    y: rng() * h,
++    vx: 0,
++    vy: 0,
++    size: 2,
++    rot: rng() * Math.PI * 2,
++    vr: 0,
++    alpha: 1,
++    phase: rng() * Math.PI * 2,
++    amp: 0,
++    freq: 1,
++    color: Math.floor(rng() * paletteSize) % Math.max(1, paletteSize),
++    life: 0,
++    maxLife: 1,
++  };
++  switch (effect) {
++    case "snow": {
++      base.size = between(rng, 1.4, 4.2);
++      // Larger flakes fall faster: reads as depth.
++      base.vy = 14 + base.size * between(rng, 6, 11);
++      base.amp = between(rng, 8, 28);
++      base.freq = between(rng, 0.3, 0.9);
++      base.alpha = between(rng, 0.45, 1);
++      if (!scatter) base.y = -base.size * 3;
++      return base;
++    }
++    case "sakura": {
++      base.size = between(rng, 7, 13);
++      base.vx = between(rng, 18, 50);
++      base.vy = between(rng, 26, 60);
++      base.vr = between(rng, 0.6, 2) * (rng() < 0.5 ? -1 : 1);
++      base.amp = between(rng, 6, 20);
++      base.freq = between(rng, 1, 2.6);
++      base.alpha = between(rng, 0.65, 1);
++      if (!scatter) {
++        // Drift in diagonally: from the top edge or the left edge.
++        if (rng() < 0.65) {
++          base.x = between(rng, -0.25 * w, w);
++          base.y = -base.size * 2;
++        } else {
++          base.x = -base.size * 2;
++          base.y = between(rng, 0, 0.7 * h);
++        }
++      }
++      return base;
++    }
++    case "embers": {
++      base.size = between(rng, 1.3, 3.4);
++      base.vy = -between(rng, 14, 42);
++      base.amp = between(rng, 6, 18);
++      base.freq = between(rng, 3, 8);
++      base.alpha = between(rng, 0.55, 1);
++      // Rise through part of the screen, then burn out.
++      base.maxLife = (h * between(rng, 0.35, 0.9)) / Math.abs(base.vy);
++      if (scatter) base.life = rng() * base.maxLife;
++      else base.y = h + base.size * 4;
++      return base;
++    }
++  }
++}
++
++/** Advance one particle by dt seconds. Returns false when it should respawn. */
++export function step(effect: ActiveEffect, p: Particle, dt: number, t: number, w: number, h: number): boolean {
++  switch (effect) {
++    case "snow":
++      p.y += p.vy * dt;
++      p.x += Math.sin(p.phase + t * p.freq) * p.amp * p.freq * dt;
++      return p.y < h + p.size * 3 && p.x > -40 && p.x < w + 40;
++    case "sakura":
++      p.x += (p.vx + Math.sin(p.phase + t * p.freq) * p.amp) * dt;
++      p.y += p.vy * dt;
++      p.rot += p.vr * dt;
++      return p.x < w + p.size * 3 && p.y < h + p.size * 3;
++    case "embers":
++      p.y += p.vy * dt;
++      p.x += Math.sin(p.phase + t * p.freq * 0.35) * p.amp * dt;
++      p.life += dt;
++      return p.life < p.maxLife && p.y > -p.size * 4;
++  }
++}
++
++/** Opacity to draw this frame (fades and flicker), 0–1. */
++export function drawAlpha(effect: ActiveEffect, p: Particle, t: number, h: number): number {
++  switch (effect) {
++    case "snow": {
++      const fadeIn = Math.min(1, (p.y + p.size * 3) / (h * 0.06 + 1));
++      const fadeOut = Math.min(1, (h - p.y) / (h * 0.12 + 1));
++      return clamp01(p.alpha * Math.max(0, Math.min(fadeIn, fadeOut)));
++    }
++    case "sakura":
++      return clamp01(p.alpha);
++    case "embers": {
++      const lifeFade = Math.sin(Math.PI * Math.min(1, p.life / p.maxLife));
++      const flicker = 0.62 + 0.38 * Math.sin(t * p.freq + p.phase);
++      return clamp01(p.alpha * lifeFade * flicker);
++    }
++  }
++}
++
++/** Sakura tumble: the petal's apparent width as it flips, -1…1. */
++export function tumble(p: Particle, t: number): number {
++  return Math.cos(p.phase + t * p.freq);
++}
++
++function clamp01(n: number): number {
++  return n < 0 ? 0 : n > 1 ? 1 : n;
++}
+diff --git a/src/core/outline/parseOutline.ts b/src/core/outline/parseOutline.ts
+new file mode 100644
+index 0000000..ed773ac
+--- /dev/null
++++ b/src/core/outline/parseOutline.ts
+@@ -0,0 +1,331 @@
++import { newId } from "../validation";
++import type { AssessmentKind, ISODate, SessionKind, Weekday } from "../types";
++import {
++  findCountEach,
++  findDate,
++  findDays,
++  findLocation,
++  findTime,
++  findTimeRange,
++  findWeight,
++  isOnlyWeight,
++  normalizeLines,
++  weekToDate,
++  type DateMatch,
++} from "./text";
++import type { ParsedAssessment, ParsedMeeting, ParsedOutline } from "./types";
++
++/**
++ * Deterministic, on-device outline parser. Pure: text in, structure out, no
++ * I/O, so it runs anywhere and every rule is covered by unit tests.
++ *
++ * It favors precision over recall. An item is kept only with evidence
++ * (a date, a week number, a weight, or TBA); everything it finds goes through
++ * a review screen before anything is saved.
++ */
++export interface ParseOptions {
++  /** Anchor for dates without a year when the outline gives no term start. */
++  today: ISODate;
++}
++
++/* ------------------------------------------------------------ course info */
++
++const CODE = /\b([A-Z]{2,5})\s?-?(\d{2,4}[A-Z]?)\b/g;
++const NOT_CODE = /^(AM|PM|ID|ISBN|WEEK|ROOM|RM|PAGE|FALL|WINTER|SPRING|SUMMER|UTC|EST|EDT)$/;
++const TERM = /\b(fall|winter|spring|summer|autumn)\s*(?:term|semester|session)?\s*,?\s*(\d{4})\b/i;
++const INSTRUCTOR =
++  /\b(?:instructors?|professors?|lecturers?|course (?:director|coordinator|instructor)|taught by)\b(?:\s*\(s\))?(?:\s+name)?\s*[:-]?\s*(.*)$/i;
++const TITLE_LABEL = /\bcourse\s+(?:title|name)\s*[:-]\s*(.+)$/i;
++
++function codeMatches(line: string) {
++  return [...line.matchAll(CODE)].filter((m) => !NOT_CODE.test(m[1]!));
++}
++
++function findCourseInfo(lines: string[]): ParsedOutline["course"] {
++  let code: string | null = null;
++  let name: string | null = null;
++  let codeLine: string | null = null;
++  let codeRaw: string | null = null;
++
++  // Prefer a code near the top (title block); else the most repeated one.
++  for (const line of lines.slice(0, 12)) {
++    const m = codeMatches(line)[0];
++    if (m) {
++      code = `${m[1]} ${m[2]}`;
++      codeLine = line;
++      codeRaw = m[0];
++      break;
++    }
++  }
++  if (!code) {
++    const counts = new Map<string, number>();
++    for (const line of lines) for (const m of codeMatches(line)) counts.set(`${m[1]} ${m[2]}`, (counts.get(`${m[1]} ${m[2]}`) ?? 0) + 1);
++    const best = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
++    if (best && best[1] >= 2) code = best[0];
++  }
++
++  const labeled = lines.map((l) => TITLE_LABEL.exec(l)).find(Boolean);
++  if (labeled) name = cleanName(labeled[1]!);
++  else if (codeLine && codeRaw) name = cleanName(codeLine.replace(codeRaw, ""));
++
++  let instructor: string | null = null;
++  for (let i = 0; i < lines.length && !instructor; i++) {
++    const m = INSTRUCTOR.exec(lines[i]!);
++    if (!m) continue;
++    instructor = personName(m[1]!) ?? (m[1]!.trim() === "" ? personName(lines[i + 1] ?? "") : null);
++  }
++
++  const term = lines.map((l) => TERM.exec(l)).find(Boolean);
++  return {
++    code,
++    name,
++    instructor,
++    term: term ? `${term[1]![0]!.toUpperCase()}${term[1]!.slice(1).toLowerCase()} ${term[2]}` : null,
++  };
++}
++
++function cleanName(raw: string): string | null {
++  const s = raw
++    .replace(/\bcourse\s+(?:outline|syllabus|information|overview)\b/gi, "")
++    .replace(TERM, "")
++    .replace(/[()]/g, " ")
++    .replace(/^[\s:,|-]+|[\s:,|-]+$/g, "")
++    .replace(/\s{2,}/g, " ");
++  return s.length >= 3 && s.length <= 90 && /[a-z]/i.test(s) ? s : null;
++}
++
++function personName(raw: string): string | null {
++  const s = raw
++    .replace(/\S+@\S+/g, "")
++    .replace(/\([^)]*\)/g, "")
++    .replace(/\b(?:dr|prof|professor|mr|ms|mrs|mx)\.?\s+/gi, "")
++    .split(/[,;|]| - |\b(?:office|email|e-mail|phone|tel)\b/i)[0]!
++    .trim();
++  const m = /^([A-Z][A-Za-z'’.-]+(?:\s+[A-Z][A-Za-z'’.-]+){0,3})/.exec(s);
++  return m && m[1]!.length >= 3 ? m[1]! : null;
++}
++
++/* ------------------------------------------------------------- term dates */
++
++const TERM_START = /\b(?:(?:classes|lectures|term|semester|instruction)\s+(?:begins?|starts?|commences?)|first\s+(?:day|class|week)\s+of\s+(?:classes|class|lectures|term))\b/i;
++const TERM_END = /\b(?:last\s+day\s+of\s+(?:classes|lectures|term)|(?:classes|lectures|term)\s+(?:ends?|finish(?:es)?))\b/i;
++
++function findTermDates(lines: string[], today: ISODate): { termStart: ISODate | null; termEnd: ISODate | null } {
++  let termStart: ISODate | null = null;
++  let termEnd: ISODate | null = null;
++  for (const line of lines) {
++    const s = TERM_START.exec(line);
++    if (s && !termStart) termStart = findDate(line.slice(s.index), today)?.date ?? null;
++    const e = TERM_END.exec(line);
++    if (e && !termEnd) termEnd = findDate(line.slice(e.index), termStart ?? today)?.date ?? null;
++  }
++  if (termStart && termEnd && termEnd < termStart) termEnd = null;
++  return { termStart, termEnd };
++}
++
++/* --------------------------------------------------------------- meetings */
++
++const NOT_MEETING = /\b(office\s*hours?|OH|exams?|midterms?|quiz(?:zes)?|tests?|deadlines?|due|drop|withdraw\w*|holiday|reading week|no class(?:es)?|closed)\b/i;
++
++function sessionKind(line: string): SessionKind | null {
++  if (/\b(?:lab(?:oratory|oratories)?s?|LAB)\b/i.test(line)) return "lab";
++  if (/\b(?:tut(?:orial)?s?|TUT)\b/i.test(line)) return "tutorial";
++  if (/\b(?:seminars?|SEM)\b/i.test(line)) return "seminar";
++  if (/\b(?:lec(?:ture)?s?|LEC)\b/i.test(line)) return "lecture";
++  return null;
++}
++
++function findMeetings(lines: string[], courseCode: string | null): ParsedMeeting[] {
++  const found: ParsedMeeting[] = [];
++  lines.forEach((line, i) => {
++    if (NOT_MEETING.test(line)) return;
++    const range = findTimeRange(line);
++    if (!range) return;
++    const prev = lines[i - 1] ?? "";
++    // Table layouts put the day or session type on the line above.
++    const prevIsLabel = prev.length <= 40 && !findTimeRange(prev) && !NOT_MEETING.test(prev);
++    let days = findDays(line);
++    if (days.length === 0 && prevIsLabel) days = findDays(prev);
++    if (days.length === 0) return;
++    const next = lines[i + 1] ?? "";
++    found.push({
++      id: newId(),
++      days,
++      start: range.start,
++      end: range.end,
++      kind: sessionKind(line) ?? (prevIsLabel ? sessionKind(prev) : null) ?? "lecture",
++      location: findLocation(line, courseCode) ?? (/^(?:room|location|rm)\b/i.test(next) ? findLocation(next, courseCode) : null),
++      source: line,
++    });
++  });
++
++  // "Monday 10-11:50" and "Wednesday 10-11:50" on separate lines are one meeting pattern.
++  const merged = new Map<string, ParsedMeeting>();
++  for (const m of found) {
++    const key = `${m.kind}|${m.start}|${m.end}|${m.location ?? ""}`;
++    const existing = merged.get(key);
++    if (existing) existing.days = [...new Set([...existing.days, ...m.days])].sort((a, b) => a - b) as Weekday[];
++    else merged.set(key, { ...m });
++  }
++  return [...merged.values()];
++}
++
++/* ------------------------------------------------------------ assessments */
++
++/** Policy sentences mention "10%" and "assignment" without being assessments. */
++const POLICY =
++  /\b(?:late|penalt\w*|deduct\w*|per day|loses?|lost|reduced|miss(?:ed|ing)?|make-?up|accommodat\w*|polic(?:y|ies)|integrity|plagiari\w*|re-?grade|appeal\w*|excus\w*|grading scheme|letter grade|extensions?)\b/i;
++
++const KINDS: Array<{ re: RegExp; kind: AssessmentKind; label: string }> = [
++  { re: /\bfinal\s+(?:exam(?:ination)?|test|assessment)\b/i, kind: "exam", label: "Final exam" },
++  { re: /\bmid-?\s?terms?(?:\s+(?:exam(?:ination)?|test))?\b/i, kind: "midterm", label: "Midterm" },
++  { re: /\bterm\s+tests?\b/i, kind: "midterm", label: "Term test" },
++  { re: /\bexam(?:ination)?s?\b/i, kind: "exam", label: "Exam" },
++  { re: /\bquiz(?:zes)?\b/i, kind: "quiz", label: "Quiz" },
++  { re: /\btests?\b/i, kind: "quiz", label: "Test" },
++  { re: /\b(?:final\s+)?projects?\b/i, kind: "project", label: "Project" },
++  { re: /\bpresentations?\b/i, kind: "project", label: "Presentation" },
++  { re: /\b(?:assignments?|homework|problem\s+sets?)\b/i, kind: "assignment", label: "Assignment" },
++  { re: /\blab(?:oratory)?\s+reports?\b/i, kind: "assignment", label: "Lab report" },
++  { re: /\blabs?\b/i, kind: "assignment", label: "Lab" },
++  { re: /\b(?:essays?|papers?|reports?|reflections?|proposals?|case stud(?:y|ies))\b/i, kind: "assignment", label: "Paper" },
++  { re: /\b(?:participation|attendance|engagement)\b/i, kind: "task", label: "Participation" },
++];
++const EXAM_LIKE = new Set<AssessmentKind>(["exam", "midterm", "quiz"]);
++
++interface Candidate extends ParsedAssessment {
++  key: string;
++}
++
++function titleFrom(line: string, start: number, cuts: Array<number | undefined>, fallback: string): string {
++  const end = Math.min(line.length, ...cuts.filter((i): i is number => i !== undefined && i > start));
++  let t = line
++    .slice(start, end)
++    .replace(/[\s:,;|(-]+$/, "")
++    .trim();
++  if ((t.match(/\(/g)?.length ?? 0) > (t.match(/\)/g)?.length ?? 0)) t = t.replace(/\s*\([^)]*$/, "");
++  if (!t || t.length > 70) t = fallback;
++  return t.charAt(0).toUpperCase() + t.slice(1);
++}
++
++function findAssessments(lines: string[], anchor: ISODate): ParsedAssessment[] {
++  const candidates: Candidate[] = [];
++
++  lines.forEach((line, i) => {
++    if (line.length > 220 || POLICY.test(line)) return;
++    const hit = KINDS.map((k) => ({ ...k, m: k.re.exec(line) })).find((k) => k.m);
++    if (!hit?.m) return;
++    const range = findTimeRange(line);
++    // "Lab: Fri 2-3:50pm" is a class meeting, not graded work.
++    if (range && findDays(line).length > 0 && !EXAM_LIKE.has(hit.kind)) return;
++
++    const each = findCountEach(line);
++    let weight = each ? { weight: each.count * each.each, index: each.index } : findWeight(line);
++    let date: DateMatch | null = findDate(line, anchor);
++
++    // DOCX/PDF tables often put the weight or date cell on its own line.
++    for (let j = i + 1; j <= i + 2 && j < lines.length; j++) {
++      const next = lines[j]!;
++      if (KINDS.some((k) => k.re.test(next))) break;
++      if (!weight && isOnlyWeight(next)) weight = { weight: Number(/[\d.]+/.exec(next)![0]), index: Infinity };
++      else if (!date && next.length <= 32) {
++        const d = findDate(next, anchor);
++        if (d) date = { ...d, index: Infinity };
++      }
++    }
++    if (!weight && !date) return;
++
++    const after = line.slice(hit.m.index + hit.m[0].length);
++    const number = /^\s*#?\s*(\d{1,2})\b/.exec(after)?.[1] ?? null;
++    const time = EXAM_LIKE.has(hit.kind) || /\bdue\b|\bby\b/i.test(line) ? findTime(line) : null;
++    const days = findDays(line);
++    const kind: AssessmentKind = hit.label === "Test" && (weight?.weight ?? 0) >= 15 ? "midterm" : hit.kind;
++    const due = /\bdue\b/i.exec(line)?.index;
++    const title = titleFrom(
++      line,
++      hit.m.index,
++      [weight?.index, date?.index, each?.index, range?.index, time?.index, due, line.indexOf(" | ")],
++      `${hit.label}${number ? ` ${number}` : ""}`,
++    );
++
++    const base = {
++      kind,
++      date: date?.date ?? null,
++      week: date?.week ?? null,
++      weekday: days.length === 1 ? days[0]! : null,
++      time: time?.time ?? null,
++      tba: date?.tba ?? false,
++      source: line,
++    };
++
++    if (each && !number) {
++      // "Labs (10 x 1%)" → Lab 1 … Lab 10, each 1%, dates to fill in.
++      const singular = hit.label;
++      for (let n = 1; n <= each.count; n++) {
++        candidates.push({
++          ...base,
++          id: newId(),
++          title: `${singular} ${n}`,
++          weight: each.each,
++          date: null,
++          week: null,
++          key: `${singular.toLowerCase()}|${n}`,
++        });
++      }
++      return;
++    }
++
++    candidates.push({ ...base, id: newId(), title, weight: weight?.weight ?? null, key: `${hit.label.toLowerCase()}|${number ?? ""}` });
++  });
++
++  // The grading table gives weights; the schedule gives dates. Same key → one item.
++  const merged = new Map<string, Candidate>();
++  for (const c of candidates) {
++    const e = merged.get(c.key);
++    if (!e) {
++      merged.set(c.key, { ...c });
++      continue;
++    }
++    e.date ??= c.date;
++    e.week ??= c.week;
++    e.weekday ??= c.weekday;
++    e.time ??= c.time;
++    e.weight ??= c.weight;
++    e.tba = e.tba && !e.date && !c.date;
++  }
++
++  return [...merged.values()]
++    .map(({ key: _key, ...rest }) => rest)
++    .sort((a, b) => (a.date ?? "9999") < (b.date ?? "9999") ? -1 : (a.date ?? "9999") > (b.date ?? "9999") ? 1 : (b.weight ?? 0) - (a.weight ?? 0));
++}
++
++/* ----------------------------------------------------------------- output */
++
++/** Calendar date for review: the explicit date, else the week number resolved against the term start. */
++export function resolveAssessmentDate(a: ParsedAssessment, termStart: ISODate | null): ISODate | null {
++  if (a.date) return a.date;
++  if (a.week && termStart) return weekToDate(termStart, a.week, a.weekday);
++  return null;
++}
++
++export function parseOutline(raw: string, { today }: ParseOptions): ParsedOutline {
++  const lines = normalizeLines(raw);
++  const course = findCourseInfo(lines);
++  const { termStart, termEnd } = findTermDates(lines, today);
++  const meetings = findMeetings(lines, course.code);
++  const assessments = findAssessments(lines, termStart ?? today);
++
++  const warnings: string[] = [];
++  if (meetings.length === 0) warnings.push("No weekly class times were found. You can add them to the course afterwards.");
++  if (assessments.length === 0) warnings.push("No graded work with a date or weight was found.");
++  const byWeek = assessments.filter((a) => !a.date && a.week);
++  if (byWeek.length && !termStart) {
++    warnings.push(`${byWeek.length} ${byWeek.length === 1 ? "item is" : "items are"} given by week number. Enter the term start date to place ${byWeek.length === 1 ? "it" : "them"} on the calendar.`);
++  }
++  const tba = assessments.filter((a) => a.tba && !a.date);
++  if (tba.length) warnings.push(`${tba.length} ${tba.length === 1 ? "item is" : "items are"} marked TBA and left unticked until you pick a date.`);
++  const total = assessments.reduce((sum, a) => sum + (a.weight ?? 0), 0);
++  if (total > 0 && Math.abs(total - 100) > 0.01) warnings.push(`The weights found add up to ${Math.round(total * 100) / 100}%, not 100%. Check the grading section.`);
++
++  return { course, termStart, termEnd, meetings, assessments, warnings };
++}
+diff --git a/src/core/outline/text.ts b/src/core/outline/text.ts
+new file mode 100644
+index 0000000..e06731d
+--- /dev/null
++++ b/src/core/outline/text.ts
+@@ -0,0 +1,245 @@
++import { addDays, diffInDays, isISODate, startOfWeek } from "../dates";
++import type { ISODate, TimeOfDay, Weekday } from "../types";
++
++/**
++ * Recognisers for the fragments course outlines are made of. Each works on a
++ * single normalised line and reports where it matched, so callers can cut
++ * titles around dates and weights.
++ */
++
++const pad = (n: number) => String(n).padStart(2, "0");
++
++/** Split into trimmed, non-empty lines with unified dashes, spaces, and am/pm. */
++export function normalizeLines(raw: string): string[] {
++  return raw
++    .replace(/^\uFEFF/, "")
++    .replace(/\r\n?/g, "\n")
++    .replace(/[\u00a0\u2007\u202f\t]/g, " ")
++    .replace(/[\u2010-\u2015\u2212]/g, "-")
++    .replace(/\b([ap])\.\s?m\.?(?=\s|$|[),;])/gi, (_, ap: string) => `${ap.toLowerCase()}m`)
++    .split("\n")
++    .map((l) => l.replace(/ {2,}/g, " ").trim())
++    .filter((l) => l.length > 0);
++}
++
++/* -------------------------------------------------------------------- days */
++
++const DAY_WORD = /\b(mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)s?\b\.?/gi;
++const DAY_INDEX: Record<string, Weekday> = { mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6, sun: 0 };
++
++/** Compact registrar notation: MWF, TTh, TR, MW, TuTh. Case-sensitive on purpose. */
++const COMPACT = /\b(?:Th|Tu|Sa|Su|M|T|W|R|F|S|U)+\b/g;
++const COMPACT_PART = /Th|Tu|Sa|Su|M|T|W|R|F|S|U/g;
++const COMPACT_INDEX: Record<string, Weekday> = { M: 1, T: 2, Tu: 2, W: 3, R: 4, Th: 4, F: 5, S: 6, Sa: 6, U: 0, Su: 0 };
++
++export function findDays(line: string): Weekday[] {
++  const days = new Set<Weekday>();
++  for (const m of line.matchAll(DAY_WORD)) days.add(DAY_INDEX[m[1]!.slice(0, 3).toLowerCase()]!);
++  for (const m of line.matchAll(COMPACT)) {
++    const parts = (m[0].match(COMPACT_PART) ?? []).map((part) => COMPACT_INDEX[part]!);
++    // A real day pattern never repeats a day; "TUT" (tutorial) would read as Tue/Sun/Tue.
++    if (new Set(parts).size !== parts.length) continue;
++    parts.forEach((d) => days.add(d));
++  }
++  return [...days].sort((a, b) => a - b);
++}
++
++/* ------------------------------------------------------------------- times */
++
++export interface TimeRangeMatch {
++  start: TimeOfDay;
++  end: TimeOfDay;
++  index: number;
++  length: number;
++}
++
++const RANGE = /\b(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)?\s*(?:-|to|until|till)\s*(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)?(?![\d:])/i;
++
++const to24 = (h: number, ap: string) => (h % 12) + (ap.toLowerCase() === "pm" ? 12 : 0);
++/** Bare hours in a timetable: 1–7 are afternoon classes, 8–12 are as written. */
++const classHour = (h: number) => (h >= 1 && h <= 7 ? h + 12 : h);
++
++export function findTimeRange(line: string): TimeRangeMatch | null {
++  const m = RANGE.exec(line);
++  if (!m) return null;
++  const [h1, m1, h2, m2] = [Number(m[1]), Number(m[2] ?? 0), Number(m[4]), Number(m[5] ?? 0)];
++  const ap1 = m[3]?.toLowerCase();
++  const ap2 = m[6]?.toLowerCase();
++  // "Oct 10-14" and "Weeks 5-6" have neither minutes nor am/pm: not times.
++  if (m[2] === undefined && m[5] === undefined && !ap1 && !ap2) return null;
++  if (m1 > 59 || m2 > 59 || h1 > 23 || h2 > 23) return null;
++  if ((ap1 && (h1 < 1 || h1 > 12)) || (ap2 && (h2 < 1 || h2 > 12))) return null;
++
++  let s: number;
++  let e: number;
++  if (ap1 || ap2) {
++    e = ap2 ? to24(h2, ap2) : h2 > 12 ? h2 : to24(h2, ap1!);
++    if (ap1) s = to24(h1, ap1);
++    else if (h1 > 12) s = h1;
++    else {
++      // "11-12:20pm": 11 shares pm only if that still starts before the end.
++      const same = to24(h1, ap2!);
++      s = same * 60 + m1 < e * 60 + m2 ? same : to24(h1, ap2 === "pm" ? "am" : "pm");
++    }
++    if (!ap2 && h2 <= 12 && e * 60 + m2 <= s * 60 + m1) e += 12;
++  } else if (h1 <= 12 && h2 <= 12) {
++    s = classHour(h1);
++    e = classHour(h2);
++    if (e * 60 + m2 <= s * 60 + m1 && e + 12 < 24) e += 12;
++  } else {
++    s = h1;
++    e = h2;
++  }
++  const startMin = s * 60 + m1;
++  const endMin = e * 60 + m2;
++  if (e > 23 || endMin <= startMin || endMin - startMin > 6 * 60) return null;
++  return { start: `${pad(s)}:${pad(m1)}`, end: `${pad(e)}:${pad(m2)}`, index: m.index, length: m[0].length };
++}
++
++const SINGLE_TIME = /\b(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)\b|\b(noon|midnight)\b|\b([01]?\d|2[0-3]):([0-5]\d)\b/i;
++
++/** A single clock time, e.g. a due time: "11:59 pm", "noon", "23:59". */
++export function findTime(line: string): { time: TimeOfDay; index: number } | null {
++  const range = findTimeRange(line);
++  if (range) return { time: range.start, index: range.index };
++  const m = SINGLE_TIME.exec(line);
++  if (!m) return null;
++  if (m[4]) return { time: m[4].toLowerCase() === "noon" ? "12:00" : "23:59", index: m.index };
++  if (m[3]) {
++    const h = Number(m[1]);
++    const min = Number(m[2] ?? 0);
++    if (h < 1 || h > 12 || min > 59) return null;
++    return { time: `${pad(to24(h, m[3]))}:${pad(min)}`, index: m.index };
++  }
++  return { time: `${pad(Number(m[5]))}:${m[6]}`, index: m.index };
++}
++
++/* ------------------------------------------------------------------- dates */
++
++const MONTHS = "jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec";
++const MONTH_FIRST = new RegExp(`\\b(${MONTHS})[a-z]*\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b(?:,?\\s+(\\d{4}))?`, "i");
++const DAY_FIRST = new RegExp(`\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+(${MONTHS})[a-z]*\\.?(?:,?\\s+(\\d{4}))?\\b`, "i");
++const ISO = /\b(\d{4})-(\d{2})-(\d{2})\b/;
++const SLASH = /\b(\d{1,2})\/(\d{1,2})(?:\/(\d{4}|\d{2}))?\b/;
++const WEEK = /\bweek\s*#?\s*(\d{1,2})\b/i;
++const TBA = /\b(tba|tbd|to be (?:announced|determined|confirmed)|(?:final )?exam(?:ination)? period)\b/i;
++const MONTH_INDEX = MONTHS.split("|");
++
++/**
++ * Year for a month/day with no year given. Anchored to the term (or today):
++ * dates more than four months before the anchor belong to the next year, which
++ * is how a January exam in a winter outline read in December resolves.
++ */
++export function inferYear(month: number, day: number, anchor: ISODate): ISODate | null {
++  const year = Number(anchor.slice(0, 4));
++  for (const y of [year, year + 1, year - 1]) {
++    const iso = `${y}-${pad(month)}-${pad(day)}`;
++    if (!isISODate(iso)) continue;
++    const delta = diffInDays(anchor, iso);
++    if (delta >= -120 && delta <= 300) return iso;
++  }
++  const fallback = `${year}-${pad(month)}-${pad(day)}`;
++  return isISODate(fallback) ? fallback : null;
++}
++
++export interface DateMatch {
++  date: ISODate | null;
++  week: number | null;
++  tba: boolean;
++  /** Index of the earliest date-like fragment, for trimming titles. */
++  index: number;
++}
++
++export function findDate(line: string, anchor: ISODate): DateMatch | null {
++  const hits: Array<{ index: number; date: ISODate | null }> = [];
++  const iso = ISO.exec(line);
++  if (iso && isISODate(iso[0])) hits.push({ index: iso.index, date: iso[0] });
++  const mf = MONTH_FIRST.exec(line);
++  if (mf) {
++    const month = MONTH_INDEX.indexOf(mf[1]!.slice(0, 3).toLowerCase()) + 1;
++    const date = mf[3] ? `${mf[3]}-${pad(month)}-${pad(Number(mf[2]))}` : inferYear(month, Number(mf[2]), anchor);
++    if (date && isISODate(date)) hits.push({ index: mf.index, date });
++  }
++  const df = DAY_FIRST.exec(line);
++  // "Assignment 2 Nov 7": both patterns share "Nov"; month-first is the real date.
++  const dfMonthAt = df ? df.index + df[0].toLowerCase().indexOf(df[2]!.toLowerCase()) : -1;
++  if (df && !(mf && mf.index === dfMonthAt)) {
++    const month = MONTH_INDEX.indexOf(df[2]!.slice(0, 3).toLowerCase()) + 1;
++    const date = df[3] ? `${df[3]}-${pad(month)}-${pad(Number(df[1]))}` : inferYear(month, Number(df[1]), anchor);
++    if (date && isISODate(date)) hits.push({ index: df.index, date });
++  }
++  const sl = SLASH.exec(line);
++  if (sl) {
++    let [a, b] = [Number(sl[1]), Number(sl[2])];
++    if (a > 12 && b <= 12) [a, b] = [b, a]; // 14/10 → Oct 14
++    const y = sl[3] ? (sl[3].length === 2 ? 2000 + Number(sl[3]) : Number(sl[3])) : null;
++    const date = y ? `${y}-${pad(a)}-${pad(b)}` : inferYear(a, b, anchor);
++    if (date && isISODate(date)) hits.push({ index: sl.index, date });
++  }
++  const wk = WEEK.exec(line);
++  const tba = TBA.exec(line);
++  if (hits.length === 0 && !wk && !tba) return null;
++  hits.sort((x, y) => x.index - y.index);
++  const indexes = [hits[0]?.index, wk?.index, tba?.index].filter((i): i is number => i !== undefined);
++  return {
++    date: hits[0]?.date ?? null,
++    week: wk ? Number(wk[1]) : null,
++    tba: Boolean(tba) && hits.length === 0,
++    index: Math.min(...indexes),
++  };
++}
++
++/** Week N of a term: N-1 weeks after the term's first week, on `weekday` if given, else the term's start weekday. */
++export function weekToDate(termStart: ISODate, week: number, weekday: Weekday | null): ISODate {
++  if (weekday === null) return addDays(termStart, 7 * (week - 1));
++  const monday = startOfWeek(termStart, 1);
++  return addDays(monday, 7 * (week - 1) + ((weekday + 6) % 7));
++}
++
++/* ----------------------------------------------------------------- weights */
++
++const PERCENT = /(\d{1,3}(?:\.\d+)?)\s*%/g;
++const COUNT_EACH = /\b(\d{1,2})\s*(?:x|×|@|\*)\s*(\d{1,3}(?:\.\d+)?)\s*%/i;
++
++export function findWeight(line: string): { weight: number; index: number } | null {
++  for (const m of line.matchAll(PERCENT)) {
++    const w = Number(m[1]);
++    if (w > 0 && w <= 100) return { weight: w, index: m.index };
++  }
++  return null;
++}
++
++/** "10 x 1%" → ten items worth 1% each. */
++export function findCountEach(line: string): { count: number; each: number; index: number } | null {
++  const m = COUNT_EACH.exec(line);
++  if (!m) return null;
++  const count = Number(m[1]);
++  const each = Number(m[2]);
++  return count >= 2 && count <= 15 && each > 0 && count * each <= 100 ? { count, each, index: m.index } : null;
++}
++
++export const isOnlyWeight = (line: string) => /^\(?\s*\d{1,3}(?:\.\d+)?\s*%\s*\)?$/.test(line);
++
++/* --------------------------------------------------------------- locations */
++
++// Label is case-insensitive, the room code itself must be uppercase (so "room for 30" isn't a room).
++const LABELED_ROOM = /\b(?:[Rr]oom|ROOM|[Rr]m\.?|RM|[Ll]ocation|LOCATION|[Ll]oc\.|[Bb]ldg\.?|[Bb]uilding|[Cc]lassroom)\s*[:#-]?\s*([A-Z]{1,5}[- ]?[A-Z]?\d{1,4}[A-Z]?)\b/;
++const IN_ROOM = /\bin\s+([A-Z]{2,5}[- ]?[A-Z]?\d{2,4}[A-Z]?)\b/;
++const BARE_ROOM = /\b([A-Z]{2,5})[- ]?([A-Z]?\d{2,4}[A-Z]?)\b/g;
++const ONLINE = /\b(online|zoom|virtual|remote|d2l|brightspace)\b/i;
++
++export function findLocation(line: string, courseCode: string | null): string | null {
++  const labeled = LABELED_ROOM.exec(line) ?? IN_ROOM.exec(line);
++  if (labeled) return labeled[1]!.replace(/-/g, " ").replace(/\s+/g, " ").trim();
++  const codeKey = courseCode?.replace(/\s+/g, "").toUpperCase();
++  for (const m of line.matchAll(BARE_ROOM)) {
++    const token = `${m[1]} ${m[2]}`;
++    if (token.replace(/\s+/g, "") === codeKey) continue;
++    if (/^(AM|PM|WEEK)$/i.test(m[1]!)) continue;
++    // "MWF 09:10": day letters followed by a clock time, not a building and room.
++    if (/^(?:Th|Tu|Sa|Su|M|T|W|R|F|S|U)+$/.test(m[1]!) || line[m.index + m[0].length] === ":") continue;
++    return token;
++  }
++  const online = ONLINE.exec(line);
++  return online ? online[1]![0]!.toUpperCase() + online[1]!.slice(1).toLowerCase() : null;
++}
+diff --git a/src/core/outline/types.ts b/src/core/outline/types.ts
+new file mode 100644
+index 0000000..080c742
+--- /dev/null
++++ b/src/core/outline/types.ts
+@@ -0,0 +1,47 @@
++import type { AssessmentKind, ID, ISODate, SessionKind, TimeOfDay, Weekday } from "../types";
++
++/**
++ * Structured result of reading a course outline. This is the only thing that
++ * leaves the parsing pipeline: the raw document text never does. `source` is
++ * the single matching line, shown during review so the student can check the
++ * extraction, and dropped when the approved items are saved.
++ */
++export interface ParsedMeeting {
++  id: ID;
++  days: Weekday[];
++  start: TimeOfDay;
++  end: TimeOfDay;
++  kind: SessionKind;
++  location: string | null;
++  source: string;
++}
++
++export interface ParsedAssessment {
++  id: ID;
++  title: string;
++  kind: AssessmentKind;
++  /** Explicit calendar date found in the outline. */
++  date: ISODate | null;
++  /** "Week 7" style reference, resolved against the term start during review. */
++  week: number | null;
++  weekday: Weekday | null;
++  time: TimeOfDay | null;
++  weight: number | null;
++  /** Outline says TBA / "during the exam period". */
++  tba: boolean;
++  source: string;
++}
++
++export interface ParsedOutline {
++  course: {
++    code: string | null;
++    name: string | null;
++    instructor: string | null;
++    term: string | null;
++  };
++  termStart: ISODate | null;
++  termEnd: ISODate | null;
++  meetings: ParsedMeeting[];
++  assessments: ParsedAssessment[];
++  warnings: string[];
++}
+diff --git a/src/core/types.ts b/src/core/types.ts
+index 2d0b0c5..544ec34 100644
+--- a/src/core/types.ts
++++ b/src/core/types.ts
+@@ -134,6 +134,19 @@ export interface Settings {
+   timeFormat: TimeFormat;
+   /** Overrides the theme's accent color; null uses the theme's own. */
+   accent: HexColor | null;
++  ambient: AmbientSettings;
++}
++
++export const AMBIENT_EFFECTS = ["none", "snow", "sakura", "embers"] as const;
++export type AmbientEffect = (typeof AMBIENT_EFFECTS)[number];
++/** "auto" animates unless the OS asks for reduced motion. */
++export type AmbientMotion = "auto" | "on" | "off";
++export type AmbientIntensity = 1 | 2 | 3 | 4 | 5;
++
++export interface AmbientSettings {
++  effect: AmbientEffect;
++  motion: AmbientMotion;
++  intensity: AmbientIntensity;
+ }
+ 
+ export type TimeFormat = "auto" | "12h" | "24h";
+@@ -145,6 +158,7 @@ export const DEFAULT_SETTINGS: Settings = {
+   notifications: false,
+   timeFormat: "auto",
+   accent: null,
++  ambient: { effect: "none", motion: "auto", intensity: 3 },
+ };
+ 
+ /** Full export format; also the migration payload between storage backends. */
+diff --git a/src/features/command-palette/CommandPalette.tsx b/src/features/command-palette/CommandPalette.tsx
+index dadfad3..8c455f4 100644
+--- a/src/features/command-palette/CommandPalette.tsx
++++ b/src/features/command-palette/CommandPalette.tsx
+@@ -5,7 +5,14 @@ import {
+   CalendarRange,
+   Check,
+   Download,
++  FileUp,
++  Flame,
++  Flower2,
+   ListChecks,
++  Pause,
++  Play,
++  Snowflake,
++  Ban,
+   Monitor,
+   Palette,
+   Plus,
+@@ -18,6 +25,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
+ import { useNavigate } from "react-router-dom";
+ import { ROUTES } from "../../app/routes";
+ import { PALETTE_SHORTCUT } from "./hotkey";
++import { useAmbientMotion } from "../../ambient/motion";
+ import { KIND_LABEL } from "../../core/assessments";
+ import { formatDate } from "../../core/dates";
+ import { parseQuickAdd, quickAddToDraft } from "../../core/quickAdd";
+@@ -78,6 +86,10 @@ export function CommandPalette() {
+   const createAssessment = useStore((s) => s.createAssessment);
+   const exportData = useStore((s) => s.exportData);
+   const showMessage = useStore((s) => s.showMessage);
++  const ambient = useStore((s) => s.settings.ambient);
++  const updateSettings = useStore((s) => s.updateSettings);
++  const openOutlineImport = useStore((s) => s.openOutlineImport);
++  const animating = useAmbientMotion();
+   const courses = useActiveCourses();
+   const courseMap = useCourseMap();
+   const [query, setQuery] = useState("");
+@@ -232,7 +244,42 @@ export function CommandPalette() {
+           </Item>
+         </Command.Group>
+ 
++        <Command.Group heading="Ambient background" className={groupClass}>
++          {(
++            [
++              ["snow", "Snowfall", Snowflake],
++              ["sakura", "Sakura petals", Flower2],
++              ["embers", "Embers", Flame],
++              ["none", "No ambient effect", Ban],
++            ] as const
++          ).map(([id, name, Icon]) => (
++            <Item
++              key={id}
++              value={`Ambient ${name}`}
++              keywords={["ambient", "particles", "background", "effect", "theme"]}
++              icon={<Icon className="h-4 w-4" />}
++              onSelect={run(() => updateSettings({ ambient: { ...ambient, effect: id } }))}
++              trailing={ambient.effect === id ? <Check className="h-4 w-4 text-accent" aria-label="Current" /> : undefined}
++            >
++              {name}
++            </Item>
++          ))}
++          {ambient.effect !== "none" ? (
++            <Item
++              value={animating ? "Pause ambient motion" : "Animate ambient background"}
++              keywords={["ambient", "motion", "animation", "reduce", "stop", "play"]}
++              icon={animating ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
++              onSelect={run(() => updateSettings({ ambient: { ...ambient, motion: animating ? "off" : "on" } }))}
++            >
++              {animating ? "Pause ambient motion" : "Animate ambient background"}
++            </Item>
++          ) : null}
++        </Command.Group>
++
+         <Command.Group heading="Data" className={groupClass}>
++          <Item value="Import course outline" keywords={["syllabus", "outline", "pdf", "docx", "import", "upload"]} icon={<FileUp className="h-4 w-4" />} onSelect={run(() => openOutlineImport(true))}>
++            Import course outline
++          </Item>
+           <Item value="Save backup" keywords={["export", "download", "backup"]} icon={<Download className="h-4 w-4" />} onSelect={run(async () => {
+               try {
+                 if (await saveBackupFile(await exportData())) showMessage("info", "Backup saved.");
+diff --git a/src/features/courses/CourseDialog.tsx b/src/features/courses/CourseDialog.tsx
+index 4342754..6ae536b 100644
+--- a/src/features/courses/CourseDialog.tsx
++++ b/src/features/courses/CourseDialog.tsx
+@@ -13,7 +13,7 @@ import { useResolvedTheme } from "../../theme/useResolvedTheme";
+ 
+ const DAYS: Weekday[] = [1, 2, 3, 4, 5, 6, 0];
+ 
+-function ColorPicker({ value, onChange, error }: { value: string; onChange: (hex: string) => void; error?: string }) {
++export function ColorPicker({ value, onChange, error }: { value: string; onChange: (hex: string) => void; error?: string }) {
+   const palette = useResolvedTheme().coursePalette;
+   const current = normalizeHex(value) ?? "#64748b";
+   return (
+@@ -157,6 +157,7 @@ export function CourseDialog() {
+   const updateCourse = useStore((s) => s.updateCourse);
+   const setArchived = useStore((s) => s.setCourseArchived);
+   const deleteCourse = useStore((s) => s.deleteCourse);
++  const openOutlineImport = useStore((s) => s.openOutlineImport);
+ 
+   const editing = dialog?.mode === "edit" ? courses.find((c) => c.id === dialog.id) ?? null : null;
+   const [draft, setDraft] = useState<CourseDraft>(() => blankCourse(courses));
+@@ -251,6 +252,18 @@ export function CourseDialog() {
+         }}
+       >
+         {errors.form ? <p role="alert" className="rounded-lg bg-danger/10 px-3 py-2 text-sm text-danger">{errors.form}</p> : null}
++        {!editing ? (
++          <button
++            type="button"
++            onClick={() => {
++              close();
++              openOutlineImport(true);
++            }}
++            className="self-start text-sm font-medium text-accent hover:underline"
++          >
++            Import classes and deadlines from a course outline instead
++          </button>
++        ) : null}
+         <div className="grid gap-4 sm:grid-cols-[1fr_2fr]">
+           <Field label="Code" error={errors.code}>
+             {(p) => <Input {...p} autoFocus placeholder="CS 101" value={draft.code} onChange={(e) => set("code", e.target.value)} />}
+diff --git a/src/features/courses/CoursesView.tsx b/src/features/courses/CoursesView.tsx
+index fcf23b3..0485fac 100644
+--- a/src/features/courses/CoursesView.tsx
++++ b/src/features/courses/CoursesView.tsx
+@@ -1,4 +1,4 @@
+-import { Plus } from "lucide-react";
++import { FileUp, Plus } from "lucide-react";
+ import { useMemo, useState } from "react";
+ import { trackAll, weightSummary } from "../../core/assessments";
+ import { formatRelative, weekdayShort } from "../../core/dates";
+@@ -80,6 +80,7 @@ export function CoursesView() {
+   const courses = useStore((s) => s.courses);
+   const assessments = useStore((s) => s.assessments);
+   const openCourseDialog = useStore((s) => s.openCourseDialog);
++  const openOutlineImport = useStore((s) => s.openOutlineImport);
+   const [showArchived, setShowArchived] = useState(false);
+ 
+   const sorted = useMemo(() => [...courses].sort((a, b) => a.code.localeCompare(b.code)), [courses]);
+@@ -90,9 +91,14 @@ export function CoursesView() {
+     <div className="mx-auto flex max-w-6xl flex-col gap-6">
+       <header className="flex flex-wrap items-center justify-between gap-3">
+         <h1 className="text-3xl font-semibold tracking-tight">Courses</h1>
+-        <Button variant="primary" onClick={() => openCourseDialog({ mode: "create" })}>
+-          <Plus className="h-4 w-4" /> Add course
+-        </Button>
++        <div className="flex flex-wrap gap-2">
++          <Button onClick={() => openOutlineImport(true)}>
++            <FileUp className="h-4 w-4" /> Import outline
++          </Button>
++          <Button variant="primary" onClick={() => openCourseDialog({ mode: "create" })}>
++            <Plus className="h-4 w-4" /> Add course
++          </Button>
++        </div>
+       </header>
+ 
+       {active.length === 0 ? (
+diff --git a/src/features/import/OutlineImportDialog.tsx b/src/features/import/OutlineImportDialog.tsx
+new file mode 100644
+index 0000000..a7fa324
+--- /dev/null
++++ b/src/features/import/OutlineImportDialog.tsx
+@@ -0,0 +1,149 @@
++import { FileText, FileUp, ShieldCheck } from "lucide-react";
++import { useEffect, useRef, useState } from "react";
++import type { ParsedOutline } from "../../core/outline/types";
++import { Button } from "../../components/ui/Button";
++import { cx } from "../../components/ui/cx";
++import { Dialog } from "../../components/ui/Dialog";
++import { OutlineReadError, readOutline, type ReadProgress } from "../../platform/outlineReader";
++import { useStore } from "../../state/store";
++import { OutlineReview } from "./OutlineReview";
++
++type Phase =
++  | { step: "pick" }
++  | { step: "reading"; fileName: string; progress: ReadProgress | null }
++  | { step: "review"; fileName: string; outline: ParsedOutline }
++  | { step: "error"; message: string };
++
++const ACCEPT = ".pdf,.docx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain";
++
++/**
++ * Course outline import: pick → read on device → review → save.
++ * Only the structured parse result is ever held in component state, and it's
++ * dropped when the dialog closes.
++ */
++export function OutlineImportDialog() {
++  const open = useStore((s) => s.outlineImportOpen);
++  const setOpen = useStore((s) => s.openOutlineImport);
++  const today = useStore((s) => s.today);
++  const [phase, setPhase] = useState<Phase>({ step: "pick" });
++  const [dragging, setDragging] = useState(false);
++  const abortRef = useRef<AbortController | null>(null);
++  const inputRef = useRef<HTMLInputElement>(null);
++
++  // Closing always discards everything: parse results, progress, pending reads.
++  useEffect(() => {
++    if (open) return;
++    abortRef.current?.abort();
++    abortRef.current = null;
++    setPhase({ step: "pick" });
++    setDragging(false);
++  }, [open]);
++
++  async function handleFile(file: File | undefined) {
++    // Clear the input right away so the browser holds no reference to the file.
++    if (inputRef.current) inputRef.current.value = "";
++    if (!file) return;
++    const controller = new AbortController();
++    abortRef.current?.abort();
++    abortRef.current = controller;
++    setPhase({ step: "reading", fileName: file.name, progress: null });
++    try {
++      const outline = await readOutline(file, {
++        today,
++        signal: controller.signal,
++        onProgress: (progress) => {
++          if (!controller.signal.aborted) setPhase({ step: "reading", fileName: file.name, progress });
++        },
++      });
++      if (!controller.signal.aborted) setPhase({ step: "review", fileName: file.name, outline });
++    } catch (err) {
++      if (controller.signal.aborted) return;
++      setPhase({
++        step: "error",
++        message: err instanceof OutlineReadError ? err.message : "Something went wrong while reading that file. Try another copy of it.",
++      });
++    } finally {
++      if (abortRef.current === controller) abortRef.current = null;
++    }
++  }
++
++  const close = () => setOpen(false);
++
++  return (
++    <Dialog
++      open={open}
++      onOpenChange={(o) => !o && close()}
++      title={phase.step === "review" ? "Review what was found" : "Import a course outline"}
++      description={phase.step === "review" ? "Untick anything that's wrong, fix dates and weights, then save." : undefined}
++      wide
++    >
++      {phase.step === "pick" || phase.step === "error" ? (
++        <div className="flex flex-col gap-4">
++          <label
++            onDragOver={(e) => {
++              e.preventDefault();
++              setDragging(true);
++            }}
++            onDragLeave={() => setDragging(false)}
++            onDrop={(e) => {
++              e.preventDefault();
++              setDragging(false);
++              void handleFile(e.dataTransfer.files[0]);
++            }}
++            className={cx(
++              "flex cursor-pointer flex-col items-center gap-3 rounded-2xl border-2 border-dashed px-6 py-10 text-center transition-colors",
++              dragging ? "border-accent bg-accent/10" : "border-border hover:border-muted hover:bg-surface-2/50",
++            )}
++          >
++            <FileUp className="h-8 w-8 text-accent" aria-hidden />
++            <span className="text-base font-medium">Drop your course outline here, or click to choose it</span>
++            <span className="text-sm text-muted">PDF, Word (.docx), or text file, up to 20 MB</span>
++            <input
++              ref={inputRef}
++              type="file"
++              accept={ACCEPT}
++              className="sr-only"
++              onChange={(e) => void handleFile(e.target.files?.[0])}
++            />
++          </label>
++
++          {phase.step === "error" ? (
++            <p role="alert" className="rounded-lg bg-danger/10 px-3 py-2 text-sm text-danger">{phase.message}</p>
++          ) : null}
++
++          <div className="flex gap-3 rounded-xl bg-surface-2 px-4 py-3 text-sm">
++            <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-success" aria-hidden />
++            <div className="flex flex-col gap-1">
++              <p className="font-medium">Private by design</p>
++              <p className="text-muted">
++                The outline is read on this device. It's never uploaded, and neither the file nor its text is saved. You'll
++                review everything that's found, and only the class times and assessments you approve are kept.
++              </p>
++            </div>
++          </div>
++        </div>
++      ) : phase.step === "reading" ? (
++        <div className="flex flex-col items-center gap-4 py-10 text-center" aria-busy="true">
++          <FileText className="h-8 w-8 animate-pulse text-accent motion-reduce:animate-none" aria-hidden />
++          <div role="status">
++            <p className="font-medium">Reading {phase.fileName}</p>
++            <p className="text-sm text-muted">
++              {phase.progress ? `Page ${phase.progress.page} of ${phase.progress.pages}` : "Opening the file…"}
++            </p>
++          </div>
++          <Button
++            variant="ghost"
++            onClick={() => {
++              abortRef.current?.abort();
++              setPhase({ step: "pick" });
++            }}
++          >
++            Cancel
++          </Button>
++        </div>
++      ) : (
++        <OutlineReview outline={phase.outline} fileName={phase.fileName} onCancel={close} onImported={close} />
++      )}
++    </Dialog>
++  );
++}
+diff --git a/src/features/import/OutlineReview.tsx b/src/features/import/OutlineReview.tsx
+new file mode 100644
+index 0000000..48495d7
+--- /dev/null
++++ b/src/features/import/OutlineReview.tsx
+@@ -0,0 +1,345 @@
++import { AlertTriangle, ShieldCheck } from "lucide-react";
++import { useMemo, useState } from "react";
++import { KIND_LABEL } from "../../core/assessments";
++import { formatDate, weekdayShort } from "../../core/dates";
++import { resolveAssessmentDate } from "../../core/outline/parseOutline";
++import type { ParsedAssessment, ParsedMeeting, ParsedOutline } from "../../core/outline/types";
++import { blankCourse } from "../../core/templates";
++import {
++  ASSESSMENT_KINDS,
++  SESSION_KINDS,
++  type AssessmentKind,
++  type FieldErrors,
++  type ID,
++  type ISODate,
++  type SessionKind,
++  type Weekday,
++} from "../../core/types";
++import { newId, normalizeCode } from "../../core/validation";
++import { Button } from "../../components/ui/Button";
++import { cx } from "../../components/ui/cx";
++import { Field, Input, Select } from "../../components/ui/Field";
++import { useActiveCourses, useFormatTime } from "../../state/hooks";
++import { useStore } from "../../state/store";
++import { ColorPicker } from "../courses/CourseDialog";
++
++const DAYS: Weekday[] = [1, 2, 3, 4, 5, 6, 0];
++
++interface ReviewMeeting extends ParsedMeeting {
++  include: boolean;
++}
++
++interface ReviewAssessment extends ParsedAssessment {
++  include: boolean;
++  /** Date the student typed; wins over the parsed or week-derived date. */
++  picked: ISODate | null;
++}
++
++function SourceLine({ text }: { text: string }) {
++  return (
++    <p className="mt-1 truncate text-[11px] text-muted" title={text}>
++      From the outline: “{text}”
++    </p>
++  );
++}
++
++export function OutlineReview({
++  outline,
++  fileName,
++  onCancel,
++  onImported,
++}: {
++  outline: ParsedOutline;
++  fileName: string;
++  onCancel: () => void;
++  onImported: () => void;
++}) {
++  const allCourses = useStore((s) => s.courses);
++  const applyOutlineImport = useStore((s) => s.applyOutlineImport);
++  const courses = useActiveCourses();
++  const formatTime = useFormatTime();
++
++  const matching = outline.course.code
++    ? courses.find((c) => normalizeCode(c.code) === normalizeCode(outline.course.code!))
++    : undefined;
++
++  const [target, setTarget] = useState<"new" | ID>(matching?.id ?? "new");
++  const [code, setCode] = useState(outline.course.code ?? "");
++  const [name, setName] = useState(outline.course.name ?? "");
++  const [instructor, setInstructor] = useState(outline.course.instructor ?? "");
++  const [color, setColor] = useState(() => blankCourse(allCourses).color);
++  const [termStart, setTermStart] = useState<ISODate | "">(outline.termStart ?? "");
++  const [termEnd, setTermEnd] = useState<ISODate | "">(outline.termEnd ?? "");
++  const [meetings, setMeetings] = useState<ReviewMeeting[]>(() => outline.meetings.map((m) => ({ ...m, include: true })));
++  const [items, setItems] = useState<ReviewAssessment[]>(() =>
++    outline.assessments.map((a) => ({
++      ...a,
++      picked: null,
++      include: Boolean(resolveAssessmentDate(a, outline.termStart)),
++    })),
++  );
++  const [errors, setErrors] = useState<FieldErrors>({});
++  const [saving, setSaving] = useState(false);
++
++  const dateOf = (a: ReviewAssessment) => a.picked ?? resolveAssessmentDate(a, termStart || null);
++  const updateMeeting = (id: string, patch: Partial<ReviewMeeting>) => setMeetings((ms) => ms.map((m) => (m.id === id ? { ...m, ...patch } : m)));
++  const updateItem = (id: string, patch: Partial<ReviewAssessment>) => setItems((xs) => xs.map((x) => (x.id === id ? { ...x, ...patch } : x)));
++
++  const chosenMeetings = meetings.filter((m) => m.include);
++  const chosenItems = items.filter((a) => a.include);
++  const weightTotal = useMemo(() => chosenItems.reduce((sum, a) => sum + (a.weight ?? 0), 0), [chosenItems]);
++  const needsDate = chosenItems.filter((a) => !dateOf(a)).length;
++  const nothingChosen = chosenMeetings.length === 0 && chosenItems.length === 0 && target !== "new";
++
++  async function importNow() {
++    setSaving(true);
++    setErrors({});
++    try {
++      const plan = {
++        target:
++          target === "new"
++            ? {
++                mode: "new" as const,
++                course: {
++                  ...blankCourse(allCourses),
++                  code,
++                  name,
++                  instructor: instructor || null,
++                  color,
++                  termStart: termStart || null,
++                  termEnd: termEnd || null,
++                },
++              }
++            : { mode: "existing" as const, courseId: target },
++        meetings: chosenMeetings.map((m) => ({ id: newId(), days: m.days, start: m.start, end: m.end, kind: m.kind, location: m.location })),
++        assessments: chosenItems.map((a) => ({
++          title: a.title,
++          kind: a.kind,
++          dueDate: dateOf(a) ?? "",
++          dueTime: a.time,
++          priority: a.kind === "exam" || a.kind === "midterm" ? ("high" as const) : ("medium" as const),
++          weight: a.weight,
++          status: "todo" as const,
++          grade: null,
++          // Source lines stay out of saved notes: only the approved fields are kept.
++          notes: "",
++        })),
++      };
++      const result = await applyOutlineImport(plan);
++      if (result.ok) onImported();
++      else setErrors(result.errors);
++    } finally {
++      setSaving(false);
++    }
++  }
++
++  // Map store error keys ("assessments.3.dueDate") back to the visible rows.
++  const itemError = (row: ReviewAssessment) => {
++    const index = chosenItems.indexOf(row);
++    if (index < 0) return undefined;
++    return Object.entries(errors).find(([k]) => k.startsWith(`assessments.${index}.`))?.[1];
++  };
++  const scheduleError = Object.entries(errors).find(([k]) => k.startsWith("schedule."))?.[1];
++
++  return (
++    <div className="flex flex-col gap-5">
++      <div className="flex items-start gap-2 rounded-xl bg-success/10 px-3 py-2 text-sm">
++        <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-success" aria-hidden />
++        <p>
++          Read on this device from <span className="font-medium">{fileName}</span>. The file wasn't uploaded or saved, and
++          its text has been discarded. Only the items you approve below are kept.
++        </p>
++      </div>
++
++      {outline.warnings.length ? (
++        <ul className="flex flex-col gap-1 rounded-xl bg-warning/10 px-3 py-2 text-sm text-warning">
++          {outline.warnings.map((w) => (
++            <li key={w} className="flex gap-2">
++              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
++              {w}
++            </li>
++          ))}
++        </ul>
++      ) : null}
++
++      {errors.form ? <p role="alert" className="rounded-lg bg-danger/10 px-3 py-2 text-sm text-danger">{errors.form}</p> : null}
++
++      {/* ---------------------------------------------------------- course */}
++      <section aria-labelledby="import-course" className="flex flex-col gap-3">
++        <h3 id="import-course" className="text-sm font-semibold">Course</h3>
++        <Field label="Add to">
++          {(p) => (
++            <Select {...p} value={target} onChange={(e) => setTarget(e.target.value)}>
++              <option value="new">A new course</option>
++              {courses.map((c) => (
++                <option key={c.id} value={c.id}>
++                  {c.code}: {c.name}
++                  {c.id === matching?.id ? " (matches this outline)" : ""}
++                </option>
++              ))}
++            </Select>
++          )}
++        </Field>
++        {target === "new" ? (
++          <>
++            <div className="grid gap-3 sm:grid-cols-[1fr_2fr]">
++              <Field label="Code" error={errors.code}>
++                {(p) => <Input {...p} value={code} onChange={(e) => setCode(e.target.value)} placeholder="CPS 109" />}
++              </Field>
++              <Field label="Name" error={errors.name}>
++                {(p) => <Input {...p} value={name} onChange={(e) => setName(e.target.value)} placeholder="Computer Science I" />}
++              </Field>
++            </div>
++            <Field label="Instructor" hint="Optional">
++              {(p) => <Input {...p} value={instructor} onChange={(e) => setInstructor(e.target.value)} />}
++            </Field>
++            <ColorPicker value={color} onChange={setColor} error={errors.color} />
++          </>
++        ) : null}
++        <div className="grid gap-3 sm:grid-cols-2">
++          <Field label="Term starts" hint="Places “Week 7” items on the calendar" error={target === "new" ? errors.termStart : undefined}>
++            {(p) => <Input {...p} type="date" value={termStart} onChange={(e) => setTermStart(e.target.value)} />}
++          </Field>
++          <Field label="Term ends" hint="Optional" error={target === "new" ? errors.termEnd : undefined}>
++            {(p) => <Input {...p} type="date" value={termEnd} onChange={(e) => setTermEnd(e.target.value)} />}
++          </Field>
++        </div>
++      </section>
++
++      {/* -------------------------------------------------------- meetings */}
++      <section aria-labelledby="import-meetings" className="flex flex-col gap-2">
++        <h3 id="import-meetings" className="text-sm font-semibold">
++          Weekly classes <span className="font-normal text-muted">{chosenMeetings.length} of {meetings.length} selected</span>
++        </h3>
++        {scheduleError ? <p className="text-xs text-danger">{scheduleError}</p> : null}
++        {meetings.length === 0 ? <p className="text-sm text-muted">None found.</p> : null}
++        {meetings.map((m) => (
++          <div key={m.id} className={cx("rounded-xl border p-3", m.include ? "border-border" : "border-dashed border-border opacity-60")}>
++            <div className="flex flex-wrap items-center gap-2">
++              <input
++                type="checkbox"
++                checked={m.include}
++                onChange={(e) => updateMeeting(m.id, { include: e.target.checked })}
++                aria-label={`Include ${m.kind} ${m.days.map(weekdayShort).join("/")} ${formatTime(m.start)}`}
++                className="h-4 w-4 accent-[rgb(var(--c-accent))]"
++              />
++              <div className="flex flex-wrap gap-1" role="group" aria-label="Days">
++                {DAYS.map((d) => {
++                  const on = m.days.includes(d);
++                  return (
++                    <button
++                      key={d}
++                      type="button"
++                      aria-pressed={on}
++                      onClick={() => updateMeeting(m.id, { days: on ? m.days.filter((x) => x !== d) : [...m.days, d].sort((a, b) => a - b) })}
++                      className={cx("h-7 min-w-10 rounded-md px-1.5 text-xs font-medium", on ? "bg-accent text-accent-fg" : "bg-surface-2 text-muted")}
++                    >
++                      {weekdayShort(d)}
++                    </button>
++                  );
++                })}
++              </div>
++            </div>
++            <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
++              <Input type="time" aria-label="Start" value={m.start} onChange={(e) => updateMeeting(m.id, { start: e.target.value })} />
++              <Input type="time" aria-label="End" value={m.end} onChange={(e) => updateMeeting(m.id, { end: e.target.value })} />
++              <Select aria-label="Type" value={m.kind} onChange={(e) => updateMeeting(m.id, { kind: e.target.value as SessionKind })}>
++                {SESSION_KINDS.map((k) => (
++                  <option key={k} value={k}>{k[0]!.toUpperCase() + k.slice(1)}</option>
++                ))}
++              </Select>
++              <Input aria-label="Room" placeholder="Room" value={m.location ?? ""} onChange={(e) => updateMeeting(m.id, { location: e.target.value || null })} />
++            </div>
++            <SourceLine text={m.source} />
++          </div>
++        ))}
++      </section>
++
++      {/* ----------------------------------------------------- assessments */}
++      <section aria-labelledby="import-assessments" className="flex flex-col gap-2">
++        <h3 id="import-assessments" className="flex flex-wrap items-baseline justify-between gap-2 text-sm font-semibold">
++          <span>
++            Assessments <span className="font-normal text-muted">{chosenItems.length} of {items.length} selected</span>
++          </span>
++          {weightTotal > 0 ? (
++            <span className={cx("text-xs font-medium tabular-nums", Math.abs(weightTotal - 100) < 0.01 ? "text-success" : "text-muted")}>
++              {Math.round(weightTotal * 100) / 100}% of the grade
++            </span>
++          ) : null}
++        </h3>
++        {items.length === 0 ? <p className="text-sm text-muted">None found.</p> : null}
++        {items.map((a) => {
++          const date = dateOf(a);
++          const err = itemError(a);
++          return (
++            <div key={a.id} className={cx("rounded-xl border p-3", a.include ? "border-border" : "border-dashed border-border opacity-60")}>
++              <div className="flex items-center gap-2">
++                <input
++                  type="checkbox"
++                  checked={a.include}
++                  onChange={(e) => updateItem(a.id, { include: e.target.checked })}
++                  aria-label={`Include ${a.title}`}
++                  className="h-4 w-4 shrink-0 accent-[rgb(var(--c-accent))]"
++                />
++                <Input aria-label="Title" value={a.title} onChange={(e) => updateItem(a.id, { title: e.target.value })} className="font-medium" />
++              </div>
++              <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
++                <Select aria-label="Type" value={a.kind} onChange={(e) => updateItem(a.id, { kind: e.target.value as AssessmentKind })}>
++                  {ASSESSMENT_KINDS.map((k) => (
++                    <option key={k} value={k}>{KIND_LABEL[k]}</option>
++                  ))}
++                </Select>
++                <Input
++                  type="date"
++                  aria-label="Due date"
++                  aria-invalid={a.include && !date}
++                  value={date ?? ""}
++                  onChange={(e) => updateItem(a.id, { picked: e.target.value || null, include: a.include || Boolean(e.target.value) })}
++                />
++                <Input type="time" aria-label="Time" value={a.time ?? ""} onChange={(e) => updateItem(a.id, { time: e.target.value || null })} />
++                <div className="relative">
++                  <Input
++                    type="number"
++                    inputMode="decimal"
++                    min={0}
++                    max={100}
++                    step="0.5"
++                    aria-label="Weight percent"
++                    value={a.weight ?? ""}
++                    onChange={(e) => updateItem(a.id, { weight: e.target.value === "" ? null : Number(e.target.value) })}
++                    className="pr-7"
++                  />
++                  <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted">%</span>
++                </div>
++              </div>
++              <p className={cx("mt-1 text-xs", err || (a.include && !date) ? "text-danger" : "text-muted")}>
++                {err ??
++                  (date
++                    ? `${formatDate(date)}${!a.date && !a.picked && a.week ? ` (week ${a.week})` : ""}`
++                    : a.tba
++                      ? "Date to be announced: pick one when it's set, or leave unticked."
++                      : a.week
++                        ? `Week ${a.week}: enter the term start above to place it.`
++                        : "Pick a date to include this.")}
++              </p>
++              <SourceLine text={a.source} />
++            </div>
++          );
++        })}
++      </section>
++
++      <div className="sticky bottom-0 -mx-5 -mb-4 flex flex-wrap items-center justify-end gap-2 border-t border-border bg-surface px-5 py-3">
++        {needsDate > 0 ? (
++          <span className="mr-auto text-xs text-danger">
++            {needsDate} selected {needsDate === 1 ? "item needs" : "items need"} a date.
++          </span>
++        ) : null}
++        <Button onClick={onCancel}>Cancel</Button>
++        <Button variant="primary" disabled={saving || needsDate > 0 || nothingChosen} onClick={() => void importNow()}>
++          {target === "new" ? "Create course" : "Add to course"}
++          {chosenItems.length + chosenMeetings.length > 0 ? ` (${chosenItems.length + chosenMeetings.length})` : ""}
++        </Button>
++      </div>
++    </div>
++  );
++}
+diff --git a/src/features/settings/SettingsView.tsx b/src/features/settings/SettingsView.tsx
+index 3f7052b..af0120d 100644
+--- a/src/features/settings/SettingsView.tsx
++++ b/src/features/settings/SettingsView.tsx
+@@ -1,6 +1,9 @@
+-import { Check, Download, Monitor, Upload } from "lucide-react";
++import { Ban, Check, Download, Flame, Flower2, Monitor, Snowflake, Upload, type LucideIcon } from "lucide-react";
+ import { useEffect, useState, type ReactNode } from "react";
+-import type { Snapshot, ThemePreference } from "../../core/types";
++import type { AmbientEffect, AmbientIntensity, AmbientMotion, Snapshot, ThemePreference } from "../../core/types";
++import { usePrefersReducedMotion } from "../../ambient/motion";
++import { ambientPalette } from "../../core/ambient";
++import { useResolvedTheme } from "../../theme/useResolvedTheme";
+ import { Button } from "../../components/ui/Button";
+ import { cx } from "../../components/ui/cx";
+ import { Dialog } from "../../components/ui/Dialog";
+@@ -170,6 +173,101 @@ function AccentPicker() {
+   );
+ }
+ 
++const EFFECT_OPTIONS: Array<{ id: AmbientEffect; name: string; icon: LucideIcon; blurb: string }> = [
++  { id: "none", name: "Off", icon: Ban, blurb: "Plain background" },
++  { id: "snow", name: "Snowfall", icon: Snowflake, blurb: "Soft drifting flakes" },
++  { id: "sakura", name: "Sakura", icon: Flower2, blurb: "Tumbling petals" },
++  { id: "embers", name: "Embers", icon: Flame, blurb: "Warm rising sparks" },
++];
++
++const INTENSITY_LABEL: Record<AmbientIntensity, string> = { 1: "Sparse", 2: "Light", 3: "Medium", 4: "Full", 5: "Heavy" };
++
++function AmbientSection() {
++  const ambient = useStore((s) => s.settings.ambient);
++  const updateSettings = useStore((s) => s.updateSettings);
++  const reducedMotion = usePrefersReducedMotion();
++  const theme = useResolvedTheme();
++  const set = (patch: Partial<typeof ambient>) => void updateSettings({ ambient: { ...ambient, ...patch } });
++  const layer = ambient.effect === "none" ? null : ambientPalette(ambient.effect, theme).layerOpacity;
++  const motionHint =
++    ambient.motion === "auto"
++      ? reducedMotion
++        ? "Your system asks for reduced motion, so particles stay still."
++        : "Follows your system's reduce-motion setting."
++      : ambient.motion === "off"
++        ? "Particles are shown as a still scene."
++        : undefined;
++
++  return (
++    <Section
++      title="Ambient background"
++      description="A living backdrop behind your schedule. Particles are dimmed for each theme so text keeps WCAG AA contrast."
++    >
++      <div role="radiogroup" aria-label="Ambient effect" className="grid grid-cols-2 gap-2 sm:grid-cols-4">
++        {EFFECT_OPTIONS.map(({ id, name, icon: Icon, blurb }) => (
++          <button
++            key={id}
++            type="button"
++            role="radio"
++            aria-checked={ambient.effect === id}
++            onClick={() => set({ effect: id })}
++            className={cx(
++              "flex flex-col items-start gap-1 rounded-xl border p-3 text-left",
++              ambient.effect === id ? "border-accent bg-accent/10 ring-2 ring-accent/30" : "border-border hover:border-muted",
++            )}
++          >
++            <Icon className={cx("h-5 w-5", ambient.effect === id ? "text-accent" : "text-muted")} aria-hidden />
++            <span className="text-sm font-medium">{name}</span>
++            <span className="text-xs text-muted">{blurb}</span>
++          </button>
++        ))}
++      </div>
++
++      {ambient.effect !== "none" ? (
++        <div className="mt-3 border-t border-border pt-2">
++          <Row label="Motion" hint={motionHint}>
++            <div role="radiogroup" aria-label="Motion" className="flex rounded-lg bg-surface-2 p-0.5">
++              {(["auto", "on", "off"] as AmbientMotion[]).map((m) => (
++                <button
++                  key={m}
++                  type="button"
++                  role="radio"
++                  aria-checked={ambient.motion === m}
++                  onClick={() => set({ motion: m })}
++                  className={cx(
++                    "rounded-md px-3 py-1 text-sm font-medium",
++                    ambient.motion === m ? "bg-surface text-text shadow-sm" : "text-muted hover:text-text",
++                  )}
++                >
++                  {m === "auto" ? "Automatic" : m === "on" ? "Animate" : "Still"}
++                </button>
++              ))}
++            </div>
++          </Row>
++          <Row label="Density" hint={INTENSITY_LABEL[ambient.intensity]}>
++            <input
++              type="range"
++              min={1}
++              max={5}
++              step={1}
++              value={ambient.intensity}
++              onChange={(e) => set({ intensity: Number(e.target.value) as AmbientIntensity })}
++              aria-label="Particle density"
++              aria-valuetext={INTENSITY_LABEL[ambient.intensity]}
++              className="w-40 accent-[rgb(var(--c-accent))]"
++            />
++          </Row>
++          {layer !== null && layer < 0.25 ? (
++            <p className="text-xs text-muted">
++              This theme leaves little contrast headroom, so particles are kept faint to protect readability.
++            </p>
++          ) : null}
++        </div>
++      ) : null}
++    </Section>
++  );
++}
++
+ function RemindersSection() {
+   const enabled = useStore((s) => s.settings.notifications);
+   const updateSettings = useStore((s) => s.updateSettings);
+@@ -442,6 +540,7 @@ export function SettingsView() {
+         </Row>
+       </Section>
+ 
++      <AmbientSection />
+       <RemindersSection />
+       <BackupSection />
+       <AboutSection />
+diff --git a/src/features/today/TodayView.tsx b/src/features/today/TodayView.tsx
+index e757045..b783dc7 100644
+--- a/src/features/today/TodayView.tsx
++++ b/src/features/today/TodayView.tsx
+@@ -1,4 +1,4 @@
+-import { MapPin, Plus } from "lucide-react";
++import { FileUp, MapPin, Plus } from "lucide-react";
+ import { formatDate } from "../../core/dates";
+ import type { ClassStatus } from "../../core/schedule";
+ import { Button } from "../../components/ui/Button";
+@@ -31,6 +31,7 @@ export function TodayView() {
+   const openCourseDialog = useStore((s) => s.openCourseDialog);
+   const openAssessmentDialog = useStore((s) => s.openAssessmentDialog);
+   const loadSampleData = useStore((s) => s.loadSampleData);
++  const openOutlineImport = useStore((s) => s.openOutlineImport);
+   const courses = useActiveCourses();
+   const classes = useTodayClasses();
+   const tracker = useTracker();
+@@ -40,10 +41,13 @@ export function TodayView() {
+       <div className="mx-auto flex max-w-md flex-col items-center gap-4 py-24 text-center">
+         <h1 className="text-2xl font-semibold">Add your first course</h1>
+         <p className="text-sm text-muted">
+-          Enter the course code, when it meets, and a color. Your classes, deadlines, and exams will fill this page.
++          Import your course outline to pull in class times and exam dates automatically, or enter a course by hand.
+         </p>
+         <div className="flex flex-wrap justify-center gap-2">
+-          <Button variant="primary" onClick={() => openCourseDialog({ mode: "create" })}>
++          <Button variant="primary" onClick={() => openOutlineImport(true)}>
++            <FileUp className="h-4 w-4" /> Import course outline
++          </Button>
++          <Button onClick={() => openCourseDialog({ mode: "create" })}>
+             <Plus className="h-4 w-4" /> Add course
+           </Button>
+           <Button variant="ghost" onClick={() => void loadSampleData()}>
+diff --git a/src/platform/outlineReader.ts b/src/platform/outlineReader.ts
+new file mode 100644
+index 0000000..0d63dd5
+--- /dev/null
++++ b/src/platform/outlineReader.ts
+@@ -0,0 +1,206 @@
++import { parseOutline } from "../core/outline/parseOutline";
++import type { ParsedOutline } from "../core/outline/types";
++import type { ISODate } from "../core/types";
++
++/**
++ * Privacy-first outline reading.
++ *
++ * Guarantees, by construction:
++ *  - On device. Bytes come from the File the student picked; nothing is sent
++ *    over the network. (In the desktop app the Tauri CSP also blocks outbound
++ *    requests, as a second line of defence.)
++ *  - No persistence. Nothing here touches IndexedDB, SQLite, localStorage,
++ *    the file system, or logs. The PDF worker is created for this one file and
++ *    terminated afterwards.
++ *  - Scoped lifetime. The document bytes and extracted text exist only inside
++ *    `readOutline`. Only the structured ParsedOutline is returned; the text
++ *    never reaches React state or the app store. The byte buffer is zeroed on
++ *    the way out.
++ *
++ * Limit: JavaScript can't overwrite strings in place, so extracted text is
++ * released for garbage collection rather than wiped. It's unreachable as soon
++ * as this function returns.
++ */
++
++export const MAX_OUTLINE_BYTES = 20 * 1024 * 1024;
++export const MAX_PDF_PAGES = 80;
++/** Below this many characters a PDF is almost certainly scanned images. */
++const MIN_TEXT_CHARS = 40;
++
++export type OutlineFormat = "pdf" | "docx" | "text";
++
++export class OutlineReadError extends Error {
++  constructor(message: string) {
++    super(message);
++    this.name = "OutlineReadError";
++  }
++}
++
++export interface ReadProgress {
++  page: number;
++  pages: number;
++}
++
++export function detectFormat(file: File): OutlineFormat {
++  const name = file.name.toLowerCase();
++  if (name.endsWith(".pdf") || file.type === "application/pdf") return "pdf";
++  if (name.endsWith(".docx") || file.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") return "docx";
++  if (/\.(txt|md|markdown|text)$/.test(name) || file.type.startsWith("text/")) return "text";
++  if (name.endsWith(".doc")) throw new OutlineReadError("Old Word files (.doc) can't be read. Open it in Word and save as .docx or PDF.");
++  throw new OutlineReadError("Choose a PDF, Word (.docx), or text file.");
++}
++
++export async function readOutline(
++  file: File,
++  options: { today: ISODate; signal?: AbortSignal; onProgress?: (p: ReadProgress) => void },
++): Promise<ParsedOutline> {
++  const format = detectFormat(file);
++  if (file.size > MAX_OUTLINE_BYTES) throw new OutlineReadError("That file is over 20 MB. Course outlines are usually much smaller; try exporting just the outline.");
++  if (file.size === 0) throw new OutlineReadError("That file is empty.");
++
++  let bytes: Uint8Array | null = new Uint8Array(await file.arrayBuffer());
++  try {
++    let text: string | null =
++      format === "pdf"
++        ? await pdfText(bytes, options.signal, options.onProgress)
++        : format === "docx"
++          ? await docxText(bytes)
++          : decodeText(bytes);
++    try {
++      if (text.replace(/\s/g, "").length < MIN_TEXT_CHARS) {
++        throw new OutlineReadError(
++          format === "pdf"
++            ? "This PDF has no readable text; it's probably a scan. Try the original Word or PDF file from your course page."
++            : "This file doesn't contain enough text to read.",
++        );
++      }
++      return parseOutline(text, { today: options.today });
++    } finally {
++      text = null;
++    }
++  } finally {
++    // Zero the copy we own. If pdf.js transferred it to its worker, it's
++    // already detached (length 0) and was freed when that worker ended.
++    if (bytes && bytes.byteLength > 0) bytes.fill(0);
++    bytes = null;
++  }
++}
++
++function throwIfAborted(signal?: AbortSignal) {
++  if (signal?.aborted) throw new DOMException("Reading was cancelled.", "AbortError");
++}
++
++function decodeText(bytes: Uint8Array): string {
++  const utf8 = new TextDecoder("utf-8").decode(bytes);
++  // Many replacement characters means it wasn't UTF-8; Windows-1252 is the usual culprit.
++  const bad = (utf8.match(/\uFFFD/g) ?? []).length;
++  return bad > 5 ? new TextDecoder("windows-1252").decode(bytes) : utf8;
++}
++
++interface PdfTextItem {
++  str: string;
++  transform: number[];
++  width: number;
++}
++
++const isTextItem = (item: unknown): item is PdfTextItem =>
++  typeof item === "object" && item !== null && "str" in item && "transform" in item;
++
++/**
++ * Rebuild visual lines from pdf.js text runs: group by baseline, order left to
++ * right. Keeps table rows ("Midterm | Week 7 | 25%") together on one line,
++ * which is what the parser expects.
++ */
++export function linesFromTextItems(items: unknown[]): string {
++  const runs = items.filter(isTextItem).filter((i) => i.str.trim() !== "");
++  runs.sort((a, b) => b.transform[5]! - a.transform[5]! || a.transform[4]! - b.transform[4]!);
++  const lines: string[] = [];
++  let current: PdfTextItem[] = [];
++  let y = Number.NaN;
++  const flush = () => {
++    if (current.length === 0) return;
++    current.sort((a, b) => a.transform[4]! - b.transform[4]!);
++    let line = "";
++    let prevEnd = Number.NaN;
++    for (const run of current) {
++      const x = run.transform[4]!;
++      // Visible gap between runs becomes a space; touching runs are one word.
++      if (line && (Number.isNaN(prevEnd) || x - prevEnd > 1.5)) line += " ";
++      line += run.str;
++      prevEnd = x + run.width;
++    }
++    lines.push(line.trim());
++    current = [];
++  };
++  for (const run of runs) {
++    const ry = run.transform[5]!;
++    if (!Number.isNaN(y) && Math.abs(ry - y) > 2.5) flush();
++    if (current.length === 0) y = ry;
++    current.push(run);
++  }
++  flush();
++  return lines.join("\n");
++}
++
++async function pdfText(bytes: Uint8Array, signal?: AbortSignal, onProgress?: (p: ReadProgress) => void): Promise<string> {
++  const pdfjs = await import("pdfjs-dist");
++  const { default: workerSrc } = await import("pdfjs-dist/build/pdf.worker.min.mjs?url");
++  pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
++  throwIfAborted(signal);
++
++  // A dedicated worker for this one document, destroyed below: nothing lingers.
++  const worker = new pdfjs.PDFWorker({ name: "studyflow-outline" });
++  const task = pdfjs.getDocument({
++    data: bytes,
++    worker,
++    isEvalSupported: false,
++    disableFontFace: true,
++    useSystemFonts: false,
++    stopAtErrors: false,
++  });
++  try {
++    const doc = await task.promise;
++    if (doc.numPages > MAX_PDF_PAGES) {
++      throw new OutlineReadError(`That PDF has ${doc.numPages} pages. Outlines are usually under ${MAX_PDF_PAGES}; try exporting just the outline.`);
++    }
++    const pages: string[] = [];
++    for (let n = 1; n <= doc.numPages; n++) {
++      throwIfAborted(signal);
++      onProgress?.({ page: n, pages: doc.numPages });
++      const page = await doc.getPage(n);
++      const content = await page.getTextContent();
++      pages.push(linesFromTextItems(content.items));
++      page.cleanup();
++    }
++    return pages.join("\n");
++  } catch (err) {
++    if (err instanceof OutlineReadError || (err instanceof DOMException && err.name === "AbortError")) throw err;
++    const name = err instanceof Error ? err.name : "";
++    if (name === "PasswordException") throw new OutlineReadError("This PDF is password-protected. Remove the password and try again.");
++    throw new OutlineReadError("This PDF couldn't be read. It may be damaged; try downloading it again.");
++  } finally {
++    await task.destroy();
++    worker.destroy();
++  }
++}
++
++interface MammothApi {
++  extractRawText(input: { arrayBuffer: ArrayBuffer }): Promise<{ value: string }>;
++}
++
++async function docxText(bytes: Uint8Array): Promise<string> {
++  const mod = (await import("mammoth/mammoth.browser.js")) as unknown as { default?: MammothApi } & Partial<MammothApi>;
++  const mammoth: MammothApi = mod.default ?? (mod as MammothApi);
++  try {
++    // mammoth wants an ArrayBuffer; hand it an exact-length view of our bytes.
++    const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
++    try {
++      return (await mammoth.extractRawText({ arrayBuffer: buffer })).value;
++    } finally {
++      new Uint8Array(buffer).fill(0);
++    }
++  } catch (err) {
++    if (err instanceof OutlineReadError) throw err;
++    throw new OutlineReadError("This Word file couldn't be read. Try saving it again as .docx or PDF.");
++  }
++}
+diff --git a/src/state/store.ts b/src/state/store.ts
+index d18bda0..c6d2b76 100644
+--- a/src/state/store.ts
++++ b/src/state/store.ts
+@@ -12,9 +12,11 @@ import {
+   type AssessmentDraft,
+   type Course,
+   type CourseDraft,
++  type FieldErrors,
+   type ID,
+   type ISODate,
+   type Result,
++  type ScheduleSlot,
+   type Settings,
+   type Snapshot,
+   type ThemePreference,
+@@ -28,6 +30,14 @@ export type AssessmentDialog =
+   | { mode: "edit"; id: ID }
+   | null;
+ 
++/** What the student approved on the outline review screen. */
++export interface OutlineImportPlan {
++  target: { mode: "new"; course: CourseDraft } | { mode: "existing"; courseId: ID };
++  /** Weekly meetings to add to the course's schedule. */
++  meetings: ScheduleSlot[];
++  assessments: Array<Omit<AssessmentDraft, "courseId">>;
++}
++
+ export interface Toast {
+   id: number;
+   tone: "info" | "error";
+@@ -55,6 +65,7 @@ interface AppState {
+   calendarMode: "week" | "month";
+   calendarAnchor: ISODate;
+   paletteOpen: boolean;
++  outlineImportOpen: boolean;
+   courseDialog: CourseDialog;
+   assessmentDialog: AssessmentDialog;
+   toast: Toast | null;
+@@ -67,6 +78,7 @@ interface AppActions {
+   setCalendarMode(mode: "week" | "month"): void;
+   setCalendarAnchor(date: ISODate): void;
+   setPaletteOpen(open: boolean): void;
++  openOutlineImport(open: boolean): void;
+   openCourseDialog(dialog: CourseDialog): void;
+   openAssessmentDialog(dialog: AssessmentDialog): void;
+   dismissToast(): void;
+@@ -89,6 +101,8 @@ interface AppActions {
+   importData(snapshot: Snapshot): Promise<void>;
+   /** Adds three demo courses with upcoming work. Only allowed when there are no courses yet. */
+   loadSampleData(): Promise<void>;
++  /** Save an approved outline import as one change, with Undo. */
++  applyOutlineImport(plan: OutlineImportPlan): Promise<Result<{ course: Course; meetings: number; assessments: number }>>;
+ }
+ 
+ export type Store = AppState & AppActions;
+@@ -166,6 +180,7 @@ export const useStore = create<Store>()((set, get) => {
+     calendarMode: "week",
+     calendarAnchor: todayISO(),
+     paletteOpen: false,
++    outlineImportOpen: false,
+     courseDialog: null,
+     assessmentDialog: null,
+     toast: null,
+@@ -192,6 +207,7 @@ export const useStore = create<Store>()((set, get) => {
+     setCalendarMode: (calendarMode) => set({ calendarMode }),
+     setCalendarAnchor: (calendarAnchor) => set({ calendarAnchor }),
+     setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
++    openOutlineImport: (outlineImportOpen) => set({ outlineImportOpen, paletteOpen: false }),
+     openCourseDialog: (courseDialog) => set({ courseDialog, paletteOpen: false }),
+     openAssessmentDialog: (assessmentDialog) => set({ assessmentDialog, paletteOpen: false }),
+     dismissToast: () => set({ toast: null }),
+@@ -354,6 +370,75 @@ export const useStore = create<Store>()((set, get) => {
+       if (saved) showToast("info", "Added 3 sample courses. Delete or archive them anytime from Courses.");
+     },
+ 
++    async applyOutlineImport(plan) {
++      const s = get();
++      let course: Course;
++      let previous: Course | null = null;
++      const slotKey = (x: ScheduleSlot) => `${[...x.days].sort().join(",")}|${x.start}|${x.end}|${x.kind}`;
++      let addedMeetings = plan.meetings.length;
++
++      if (plan.target.mode === "new") {
++        const v = validateCourse({ ...plan.target.course, schedule: plan.meetings }, s.courses);
++        if (!v.ok) return v;
++        const ts = Date.now();
++        course = { ...v.value, id: newId(), createdAt: ts, updatedAt: ts };
++      } else {
++        const targetId = plan.target.courseId;
++        const existing = s.courses.find((c) => c.id === targetId);
++        if (!existing) return storageFailure("That course no longer exists.");
++        const have = new Set(existing.schedule.map(slotKey));
++        const fresh = plan.meetings.filter((m) => !have.has(slotKey(m)));
++        addedMeetings = fresh.length;
++        const v = validateCourse({ ...existing, schedule: [...existing.schedule, ...fresh] }, s.courses, existing.id);
++        if (!v.ok) return v;
++        previous = existing;
++        course = { ...existing, ...v.value, updatedAt: Date.now() };
++      }
++
++      const courseList = [...s.courses.filter((c) => c.id !== course.id), course];
++      const errors: FieldErrors = {};
++      const created: Assessment[] = [];
++      const ts = Date.now();
++      plan.assessments.forEach((draft, i) => {
++        const v = validateAssessment({ ...draft, courseId: course.id }, courseList);
++        if (!v.ok) for (const [field, msg] of Object.entries(v.errors)) errors[`assessments.${i}.${field}`] = msg;
++        else created.push({ ...v.value, id: newId(), createdAt: ts, updatedAt: ts });
++      });
++      if (Object.keys(errors).length) return { ok: false, errors };
++
++      const saved = await commit(
++        (st) => ({
++          courses: previous ? st.courses.map((c) => (c.id === course.id ? course : c)) : [...st.courses, course],
++          assessments: [...st.assessments, ...created],
++        }),
++        async (r) => {
++          await r.upsertCourse(course);
++          for (const a of created) await r.upsertAssessment(a);
++        },
++      );
++      if (!saved) return storageFailure("The import wasn't saved. Try again.");
++
++      const createdIds = new Set(created.map((a) => a.id));
++      const parts = [
++        addedMeetings ? `${addedMeetings} class ${addedMeetings === 1 ? "time" : "times"}` : "",
++        created.length ? `${created.length} ${created.length === 1 ? "assessment" : "assessments"}` : "",
++      ].filter(Boolean);
++      showToast("info", `${course.code}: added ${parts.join(" and ") || "the course"}.`, async () => {
++        await commit(
++          (st) => ({
++            courses: previous ? st.courses.map((c) => (c.id === course.id ? previous! : c)) : st.courses.filter((c) => c.id !== course.id),
++            assessments: st.assessments.filter((a) => !createdIds.has(a.id)),
++          }),
++          async (r) => {
++            for (const id of createdIds) await r.deleteAssessment(id);
++            if (previous) await r.upsertCourse(previous);
++            else await r.deleteCourse(course.id);
++          },
++        );
++      });
++      return { ok: true, value: { course, meetings: addedMeetings, assessments: created.length } };
++    },
++
+     async importData(snapshot) {
+       const r = requireRepo();
+       const previous = await r.exportSnapshot();
+diff --git a/src/storage/snapshot.ts b/src/storage/snapshot.ts
+index ac4475b..6e58d51 100644
+--- a/src/storage/snapshot.ts
++++ b/src/storage/snapshot.ts
+@@ -1,8 +1,18 @@
+ import { isHexColor, normalizeHex } from "../core/colors";
+ import { coerceAssessment, coerceCourse } from "../core/validation";
+-import { DEFAULT_SETTINGS, THEME_IDS, type Settings, type Snapshot } from "../core/types";
++import { AMBIENT_EFFECTS, DEFAULT_SETTINGS, THEME_IDS, type AmbientSettings, type Settings, type Snapshot } from "../core/types";
+ import { StorageError } from "./repository";
+ 
++function coerceAmbient(raw: unknown): AmbientSettings {
++  const r = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
++  const intensity = Number(r.intensity);
++  return {
++    effect: AMBIENT_EFFECTS.includes(r.effect as never) ? (r.effect as AmbientSettings["effect"]) : "none",
++    motion: r.motion === "on" || r.motion === "off" ? r.motion : "auto",
++    intensity: Number.isInteger(intensity) && intensity >= 1 && intensity <= 5 ? (intensity as AmbientSettings["intensity"]) : 3,
++  };
++}
++
+ export function coerceSettings(raw: unknown): Settings {
+   if (!raw || typeof raw !== "object") return { ...DEFAULT_SETTINGS };
+   const r = raw as Record<string, unknown>;
+@@ -18,6 +28,7 @@ export function coerceSettings(raw: unknown): Settings {
+     notifications: r.notifications === true,
+     timeFormat: r.timeFormat === "12h" || r.timeFormat === "24h" ? r.timeFormat : "auto",
+     accent: typeof r.accent === "string" && isHexColor(normalizeHex(r.accent)) ? normalizeHex(r.accent) : null,
++    ambient: coerceAmbient(r.ambient),
+   };
+ }
+ 
+diff --git a/src/styles/globals.css b/src/styles/globals.css
+index 1618639..8210656 100644
+--- a/src/styles/globals.css
++++ b/src/styles/globals.css
+@@ -9,7 +9,7 @@
+   --c-surface-2: 236 239 244;
+   --c-border: 220 224 232;
+   --c-text: 22 27 38;
+-  --c-muted: 92 100 117;
++  --c-muted: 74 80 94;
+   --c-accent: 52 88 214;
+   --c-accent-fg: 255 255 255;
+   --c-danger: 200 45 60;
+diff --git a/src/theme/themes.ts b/src/theme/themes.ts
+index 8969243..65c4515 100644
+--- a/src/theme/themes.ts
++++ b/src/theme/themes.ts
+@@ -5,6 +5,10 @@ import type { Theme, ThemeId } from "../core/types";
+  * Every token is an "R G B" triplet consumed as rgb(var(--c-*)) so Tailwind
+  * opacity modifiers (bg-accent/10) work. Add a theme by adding an entry here;
+  * nothing else needs to change.
++ *
++ * Muted text is set well above the 4.5:1 minimum (7:1 on light themes, 8.5:1
++ * on dark ones) so the ambient particle layer has contrast headroom to use.
++ * tests/ambient.test.ts fails if a theme leaves an effect too faint.
+  */
+ export const THEMES: Record<ThemeId, Theme> = {
+   light: {
+@@ -17,7 +21,7 @@ export const THEMES: Record<ThemeId, Theme> = {
+       surface2: "236 239 244",
+       border: "220 224 232",
+       text: "22 27 38",
+-      muted: "92 100 117",
++      muted: "74 80 94",
+       accent: "52 88 214",
+       accentFg: "255 255 255",
+       danger: "200 45 60",
+@@ -36,7 +40,7 @@ export const THEMES: Record<ThemeId, Theme> = {
+       surface2: "32 37 50",
+       border: "46 52 68",
+       text: "232 235 242",
+-      muted: "150 158 176",
++      muted: "173 180 194",
+       accent: "132 156 255",
+       accentFg: "16 19 27",
+       danger: "255 120 130",
+@@ -55,7 +59,7 @@ export const THEMES: Record<ThemeId, Theme> = {
+       surface2: "242 236 249",
+       border: "229 220 240",
+       text: "44 36 64",
+-      muted: "110 100 134",
++      muted: "86 78 105",
+       accent: "132 94 196",
+       accentFg: "255 255 255",
+       danger: "196 64 96",
+@@ -77,7 +81,7 @@ export const THEMES: Record<ThemeId, Theme> = {
+       surface2: "46 27 74",
+       border: "72 45 106",
+       text: "246 234 255",
+-      muted: "188 162 216",
++      muted: "193 169 219",
+       accent: "255 92 190",
+       accentFg: "22 13 38",
+       danger: "255 105 120",
+@@ -99,7 +103,7 @@ export const THEMES: Record<ThemeId, Theme> = {
+       surface2: "240 240 240",
+       border: "224 224 224",
+       text: "20 20 20",
+-      muted: "108 108 108",
++      muted: "82 82 82",
+       accent: "20 20 20",
+       accentFg: "255 255 255",
+       danger: "180 30 30",
+diff --git a/src/types/modules.d.ts b/src/types/modules.d.ts
+new file mode 100644
+index 0000000..28124f1
+--- /dev/null
++++ b/src/types/modules.d.ts
+@@ -0,0 +1,2 @@
++/** mammoth's browser bundle ships without type declarations; outlineReader.ts types the one call it uses. */
++declare module "mammoth/mammoth.browser.js";
+diff --git a/tests/ambient.test.ts b/tests/ambient.test.ts
+new file mode 100644
+index 0000000..7f03b54
+--- /dev/null
++++ b/tests/ambient.test.ts
+@@ -0,0 +1,78 @@
++import { describe, expect, it } from "vitest";
++import {
++  ambientPalette,
++  drawAlpha,
++  particleCount,
++  seededRng,
++  spawn,
++  step,
++  MAX_PARTICLES,
++  MIN_PARTICLES,
++  type ActiveEffect,
++} from "../src/core/ambient";
++import { channelsToRgb, contrastRatio, mix } from "../src/core/colors";
++import { THEMES } from "../src/theme/themes";
++
++const EFFECTS: ActiveEffect[] = ["snow", "sakura", "embers"];
++
++describe("ambient accessibility", () => {
++  it("keeps body and muted text at WCAG AA over any particle, on every theme", () => {
++    for (const theme of Object.values(THEMES)) {
++      const bg = channelsToRgb(theme.tokens.bg);
++      const inks = [channelsToRgb(theme.tokens.text), channelsToRgb(theme.tokens.muted)];
++      for (const effect of EFFECTS) {
++        const { colors, layerOpacity } = ambientPalette(effect, theme);
++        for (let a = 0; a <= layerOpacity + 1e-9; a += 0.01) {
++          for (const c of colors) {
++            const behind = mix(c, bg, a);
++            for (const ink of inks) expect(contrastRatio(ink, behind)).toBeGreaterThanOrEqual(4.5);
++          }
++        }
++      }
++    }
++  });
++
++  it("still leaves every effect visible on every theme", () => {
++    for (const theme of Object.values(THEMES)) {
++      for (const effect of EFFECTS) {
++        expect(ambientPalette(effect, theme).layerOpacity).toBeGreaterThanOrEqual(0.2);
++      }
++    }
++  });
++});
++
++describe("ambient simulation", () => {
++  it("scales particle count with viewport and intensity, within limits", () => {
++    expect(particleCount("snow", 1920, 1080, 3)).toBeGreaterThanOrEqual(80);
++    expect(particleCount("snow", 1920, 1080, 5) > particleCount("snow", 1920, 1080, 1)).toBe(true);
++    expect(particleCount("snow", 7680, 4320, 5)).toBe(MAX_PARTICLES);
++    expect(particleCount("embers", 320, 480, 1)).toBe(MIN_PARTICLES);
++  });
++
++  it("moves each effect in its direction and keeps values finite", () => {
++    for (const effect of EFFECTS) {
++      const rng = seededRng(42);
++      const w = 1200;
++      const h = 800;
++      const p = spawn(effect, w, h, rng, 3, true);
++      const y0 = p.y;
++      const x0 = p.x;
++      let alive = true;
++      for (let i = 0; i < 30 && alive; i++) alive = step(effect, p, 1 / 60, i / 60, w, h);
++      for (const v of [p.x, p.y, p.rot, drawAlpha(effect, p, 0.5, h)]) expect(Number.isFinite(v)).toBe(true);
++      if (effect === "snow") expect(p.y > y0).toBe(true);
++      if (effect === "embers") expect(p.y < y0).toBe(true);
++      if (effect === "sakura") expect(p.x > x0 && p.y > y0).toBe(true);
++      const a = drawAlpha(effect, p, 0.5, h);
++      expect(a >= 0 && a <= 1).toBe(true);
++    }
++  });
++
++  it("respawns particles that leave the screen", () => {
++    const rng = seededRng(7);
++    const p = spawn("snow", 400, 300, rng, 2, false);
++    let steps = 0;
++    while (step("snow", p, 0.05, steps * 0.05, 400, 300) && steps < 10_000) steps++;
++    expect(steps < 10_000).toBe(true);
++  });
++});
+diff --git a/tests/outline.test.ts b/tests/outline.test.ts
+new file mode 100644
+index 0000000..1be8cb1
+--- /dev/null
++++ b/tests/outline.test.ts
+@@ -0,0 +1,196 @@
++import { describe, expect, it } from "vitest";
++import { parseOutline, resolveAssessmentDate } from "../src/core/outline/parseOutline";
++import { findDate, findDays, findLocation, findTimeRange, normalizeLines } from "../src/core/outline/text";
++import { linesFromTextItems, MAX_OUTLINE_BYTES, OutlineReadError, readOutline } from "../src/platform/outlineReader";
++
++const TODAY = "2026-09-24";
++
++const TMU_OUTLINE = `
++Toronto Metropolitan University
++CPS 109: Computer Science I
++Fall 2026 – Course Outline
++Instructor: Dr. Jane Okafor (jokafor@torontomu.ca)
++Office hours: Thursdays 1:00–2:00 p.m., ENG 288
++Lectures: Monday and Wednesday, 10:00 a.m. – 11:50 a.m., Room KHW 071
++Lab: Fri 2-3:50pm in ENG 203
++Classes begin September 8, 2026. Last day of classes: December 7, 2026.
++
++Evaluation
++Assignment 1 (Python basics)\tOct 3\t10%
++Assignment 2\tNov 7\t10%
++Labs (10 x 1%)\t10%
++Midterm Exam\tWeek 7\t25%
++Final Exam\tTBA (final exam period)\t45%
++
++Late assignments lose 10% per day.
++
++Schedule
++Week 7 (Oct 20): Midterm exam in class
++`;
++
++describe("outline text recognisers", () => {
++  it("reads day names, plurals, and registrar shorthand", () => {
++    expect(findDays("Mondays and Wednesdays")).toEqual([1, 3]);
++    expect(findDays("LEC MWF 09:10-10:00")).toEqual([1, 3, 5]);
++    expect(findDays("TUT TTh 4-5pm")).toEqual([2, 4]);
++    expect(findDays("TR 13:00-14:20")).toEqual([2, 4]);
++    expect(findDays("The Tutorial Monthly Weekly")).toEqual([]);
++  });
++  it("resolves am/pm the way timetables write them", () => {
++    expect(findTimeRange("10:00 am - 11:50 am")).toEqual({ start: "10:00", end: "11:50", index: 0, length: 19 });
++    expect(findTimeRange("11-12:20pm")?.start).toBe("11:00");
++    expect(findTimeRange("2-3:50pm")?.start).toBe("14:00");
++    expect(findTimeRange("12:10-1:00")?.end).toBe("13:00");
++    expect(findTimeRange("14:00-15:20")?.start).toBe("14:00");
++    expect(findTimeRange("Oct 10-14")).toBe(null);
++    expect(findTimeRange("Weeks 5-6")).toBe(null);
++  });
++  it("normalises dashes and a.m./p.m.", () => {
++    expect(normalizeLines("1:00–2:00 p.m.")).toEqual(["1:00-2:00 pm"]);
++  });
++  it("reads dates in common outline formats, inferring the year", () => {
++    expect(findDate("Oct 3", TODAY)?.date).toBe("2026-10-03");
++    expect(findDate("due 14 November", TODAY)?.date).toBe("2026-11-14");
++    expect(findDate("Jan 15", "2026-12-10")?.date).toBe("2027-01-15");
++    expect(findDate("2026-10-14", TODAY)?.date).toBe("2026-10-14");
++    expect(findDate("Week 7", TODAY)?.week).toBe(7);
++    expect(findDate("TBA", TODAY)?.tba).toBe(true);
++    expect(findDate("Students may submit twice", TODAY)).toBe(null);
++  });
++  it("finds rooms without mistaking course codes or day letters for them", () => {
++    expect(findLocation("Room KHW 071", "CPS 109")).toBe("KHW 071");
++    expect(findLocation("LEC MWF 09:10-10:00 VIC 507", "CPS 109")).toBe("VIC 507");
++    expect(findLocation("CPS 109 lecture", "CPS 109")).toBe(null);
++    expect(findLocation("room for 30 students", null)).toBe(null);
++  });
++});
++
++describe("parseOutline on a TMU-style outline", () => {
++  const out = parseOutline(TMU_OUTLINE, { today: TODAY });
++
++  it("finds course details and term dates", () => {
++    expect(out.course.code).toBe("CPS 109");
++    expect(out.course.name).toBe("Computer Science I");
++    expect(out.course.instructor).toBe("Jane Okafor");
++    expect(out.course.term).toBe("Fall 2026");
++    expect(out.termStart).toBe("2026-09-08");
++    expect(out.termEnd).toBe("2026-12-07");
++  });
++
++  it("finds lectures and the lab, but not office hours", () => {
++    const simple = out.meetings.map(({ days, start, end, kind, location }) => ({ days, start, end, kind, location }));
++    expect(simple).toEqual([
++      { days: [1, 3], start: "10:00", end: "11:50", kind: "lecture", location: "KHW 071" },
++      { days: [5], start: "14:00", end: "15:50", kind: "lab", location: "ENG 203" },
++    ]);
++  });
++
++  it("finds graded work, merges the midterm, expands labs, and skips the late policy", () => {
++    const byTitle = new Map(out.assessments.map((a) => [a.title, a]));
++    expect(byTitle.get("Assignment 1 (Python basics)")?.date).toBe("2026-10-03");
++    expect(byTitle.get("Assignment 1 (Python basics)")?.weight).toBe(10);
++    expect(byTitle.get("Assignment 2")?.date).toBe("2026-11-07");
++    const midterm = byTitle.get("Midterm Exam")!;
++    expect(midterm.kind).toBe("midterm");
++    expect(midterm.weight).toBe(25);
++    expect(midterm.date).toBe("2026-10-20");
++    const final = byTitle.get("Final Exam")!;
++    expect(final.kind).toBe("exam");
++    expect(final.weight).toBe(45);
++    expect(final.tba).toBe(true);
++    expect(final.date).toBe(null);
++    expect(out.assessments.filter((a) => a.title.startsWith("Lab "))).toHaveLength(10);
++    expect(out.assessments.some((a) => /late/i.test(a.source))).toBe(false);
++    const total = out.assessments.reduce((s, a) => s + (a.weight ?? 0), 0);
++    expect(total).toBe(100);
++  });
++
++  it("warns about the TBA final but not about weights", () => {
++    expect(out.warnings.some((w) => w.includes("TBA"))).toBe(true);
++    expect(out.warnings.some((w) => w.includes("add up"))).toBe(false);
++  });
++});
++
++describe("parseOutline edge cases", () => {
++  it("reads table cells split onto separate lines (DOCX tables)", () => {
++    const out = parseOutline("MTH 207 Calculus II\nMidterm\n30%\nOct 22\nQuiz 1\n5%", { today: TODAY });
++    const midterm = out.assessments.find((a) => a.kind === "midterm")!;
++    expect(midterm.weight).toBe(30);
++    expect(midterm.date).toBe("2026-10-22");
++    expect(out.assessments.find((a) => a.title === "Quiz 1")?.weight).toBe(5);
++  });
++
++  it("places week-numbered items once a term start is known", () => {
++    const out = parseOutline("CPS 209\nProject proposal Week 4 (Friday) 10%", { today: TODAY });
++    const item = out.assessments[0]!;
++    expect(item.week).toBe(4);
++    expect(item.weekday).toBe(5);
++    expect(resolveAssessmentDate(item, null)).toBe(null);
++    expect(resolveAssessmentDate(item, "2026-09-08")).toBe("2026-10-02");
++    expect(out.warnings.some((w) => w.includes("week number"))).toBe(true);
++  });
++
++  it("reads due times and quiz dates in prose", () => {
++    const out = parseOutline("Quiz 3 on Tuesday, Oct 14 at 7:00pm (5%)", { today: TODAY });
++    const q = out.assessments[0]!;
++    expect(q.title).toBe("Quiz 3 on Tuesday");
++    expect(q.date).toBe("2026-10-14");
++    expect(q.time).toBe("19:00");
++    expect(q.weight).toBe(5);
++  });
++
++  it("merges meeting days written on separate lines", () => {
++    const out = parseOutline("Monday 9:10-10:00 LEC\nWednesday 9:10-10:00 LEC", { today: TODAY });
++    expect(out.meetings).toHaveLength(1);
++    expect(out.meetings[0]!.days).toEqual([1, 3]);
++  });
++
++  it("returns nothing, with warnings, for text that isn't an outline", () => {
++    const out = parseOutline("Dear students, welcome! Please read the chapter.", { today: TODAY });
++    expect(out.meetings).toHaveLength(0);
++    expect(out.assessments).toHaveLength(0);
++    expect(out.warnings.length).toBeGreaterThanOrEqual(2);
++  });
++});
++
++describe("outline reading pipeline", () => {
++  it("rebuilds PDF table rows from positioned text runs", () => {
++    const run = (str: string, x: number, y: number, width = str.length * 5) => ({ str, transform: [1, 0, 0, 1, x, y], width });
++    const text = linesFromTextItems([
++      run("Final Exam", 72, 500),
++      run("CPS 109", 72, 700),
++      run("45%", 400, 500.8),
++      run("Mid", 72, 600),
++      run("term", 87, 600),
++      run("25%", 400, 600),
++      { type: "beginMarkedContent" },
++    ]);
++    expect(text).toBe("CPS 109\nMidterm 25%\nFinal Exam 45%");
++  });
++
++  it("returns only structured data, never the document's text", async () => {
++    const secret = "Personal note: my student number is 501234567 and I live at 12 Example St.";
++    const file = new File([`CPS 109: Computer Science I\n${secret}\nMidterm Oct 20 25%\n`], "outline.txt", { type: "text/plain" });
++    const outline = await readOutline(file, { today: TODAY });
++    const serialized = JSON.stringify(outline);
++    expect(serialized.includes("501234567")).toBe(false);
++    expect(serialized.includes("Example St")).toBe(false);
++    expect(outline.assessments[0]?.weight).toBe(25);
++  });
++
++  it("rejects unsupported, empty, and oversized files with a helpful message", async () => {
++    const attempt = async (file: File) => {
++      try {
++        await readOutline(file, { today: TODAY });
++        return "no error";
++      } catch (err) {
++        return err instanceof OutlineReadError ? err.message : `unexpected: ${String(err)}`;
++      }
++    };
++    expect((await attempt(new File(["x"], "old.doc"))).includes(".docx")).toBe(true);
++    expect((await attempt(new File([""], "empty.txt", { type: "text/plain" })))).toBe("That file is empty.");
++    expect((await attempt(new File(["hello"], "short.txt", { type: "text/plain" }))).includes("enough text")).toBe(true);
++    const big = new File([new Uint8Array(MAX_OUTLINE_BYTES + 1)], "big.pdf", { type: "application/pdf" });
++    expect((await attempt(big)).includes("20 MB")).toBe(true);
++  });
++});
+diff --git a/vite.config.ts b/vite.config.ts
+index 7481b80..f94907b 100644
+--- a/vite.config.ts
++++ b/vite.config.ts
+@@ -23,6 +23,8 @@ export default defineConfig({
+     watch: { ignored: ["**/src-tauri/**"] },
+   },
+   envPrefix: ["VITE_", "TAURI_ENV_*"],
++  // The ambient particle worker is created with { type: "module" }; emit it as an ES module to match.
++  worker: { format: "es" },
+   build: {
+     // WebView2 (Chromium) on Windows; WebKit on macOS, iOS, and Linux.
+     target: process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome105" : "safari15",
+-- 
+2.43.0
+

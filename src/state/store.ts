@@ -12,9 +12,11 @@ import {
   type AssessmentDraft,
   type Course,
   type CourseDraft,
+  type FieldErrors,
   type ID,
   type ISODate,
   type Result,
+  type ScheduleSlot,
   type Settings,
   type Snapshot,
   type ThemePreference,
@@ -27,6 +29,14 @@ export type AssessmentDialog =
   | { mode: "create"; prefill?: Partial<AssessmentDraft> }
   | { mode: "edit"; id: ID }
   | null;
+
+/** What the student approved on the outline review screen. */
+export interface OutlineImportPlan {
+  target: { mode: "new"; course: CourseDraft } | { mode: "existing"; courseId: ID };
+  /** Weekly meetings to add to the course's schedule. */
+  meetings: ScheduleSlot[];
+  assessments: Array<Omit<AssessmentDraft, "courseId">>;
+}
 
 export interface Toast {
   id: number;
@@ -55,6 +65,7 @@ interface AppState {
   calendarMode: "week" | "month";
   calendarAnchor: ISODate;
   paletteOpen: boolean;
+  outlineImportOpen: boolean;
   courseDialog: CourseDialog;
   assessmentDialog: AssessmentDialog;
   toast: Toast | null;
@@ -67,6 +78,7 @@ interface AppActions {
   setCalendarMode(mode: "week" | "month"): void;
   setCalendarAnchor(date: ISODate): void;
   setPaletteOpen(open: boolean): void;
+  openOutlineImport(open: boolean): void;
   openCourseDialog(dialog: CourseDialog): void;
   openAssessmentDialog(dialog: AssessmentDialog): void;
   dismissToast(): void;
@@ -89,6 +101,8 @@ interface AppActions {
   importData(snapshot: Snapshot): Promise<void>;
   /** Adds three demo courses with upcoming work. Only allowed when there are no courses yet. */
   loadSampleData(): Promise<void>;
+  /** Save an approved outline import as one change, with Undo. */
+  applyOutlineImport(plan: OutlineImportPlan): Promise<Result<{ course: Course; meetings: number; assessments: number }>>;
 }
 
 export type Store = AppState & AppActions;
@@ -166,6 +180,7 @@ export const useStore = create<Store>()((set, get) => {
     calendarMode: "week",
     calendarAnchor: todayISO(),
     paletteOpen: false,
+    outlineImportOpen: false,
     courseDialog: null,
     assessmentDialog: null,
     toast: null,
@@ -192,6 +207,7 @@ export const useStore = create<Store>()((set, get) => {
     setCalendarMode: (calendarMode) => set({ calendarMode }),
     setCalendarAnchor: (calendarAnchor) => set({ calendarAnchor }),
     setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
+    openOutlineImport: (outlineImportOpen) => set({ outlineImportOpen, paletteOpen: false }),
     openCourseDialog: (courseDialog) => set({ courseDialog, paletteOpen: false }),
     openAssessmentDialog: (assessmentDialog) => set({ assessmentDialog, paletteOpen: false }),
     dismissToast: () => set({ toast: null }),
@@ -352,6 +368,75 @@ export const useStore = create<Store>()((set, get) => {
         },
       );
       if (saved) showToast("info", "Added 3 sample courses. Delete or archive them anytime from Courses.");
+    },
+
+    async applyOutlineImport(plan) {
+      const s = get();
+      let course: Course;
+      let previous: Course | null = null;
+      const slotKey = (x: ScheduleSlot) => `${[...x.days].sort().join(",")}|${x.start}|${x.end}|${x.kind}`;
+      let addedMeetings = plan.meetings.length;
+
+      if (plan.target.mode === "new") {
+        const v = validateCourse({ ...plan.target.course, schedule: plan.meetings }, s.courses);
+        if (!v.ok) return v;
+        const ts = Date.now();
+        course = { ...v.value, id: newId(), createdAt: ts, updatedAt: ts };
+      } else {
+        const targetId = plan.target.courseId;
+        const existing = s.courses.find((c) => c.id === targetId);
+        if (!existing) return storageFailure("That course no longer exists.");
+        const have = new Set(existing.schedule.map(slotKey));
+        const fresh = plan.meetings.filter((m) => !have.has(slotKey(m)));
+        addedMeetings = fresh.length;
+        const v = validateCourse({ ...existing, schedule: [...existing.schedule, ...fresh] }, s.courses, existing.id);
+        if (!v.ok) return v;
+        previous = existing;
+        course = { ...existing, ...v.value, updatedAt: Date.now() };
+      }
+
+      const courseList = [...s.courses.filter((c) => c.id !== course.id), course];
+      const errors: FieldErrors = {};
+      const created: Assessment[] = [];
+      const ts = Date.now();
+      plan.assessments.forEach((draft, i) => {
+        const v = validateAssessment({ ...draft, courseId: course.id }, courseList);
+        if (!v.ok) for (const [field, msg] of Object.entries(v.errors)) errors[`assessments.${i}.${field}`] = msg;
+        else created.push({ ...v.value, id: newId(), createdAt: ts, updatedAt: ts });
+      });
+      if (Object.keys(errors).length) return { ok: false, errors };
+
+      const saved = await commit(
+        (st) => ({
+          courses: previous ? st.courses.map((c) => (c.id === course.id ? course : c)) : [...st.courses, course],
+          assessments: [...st.assessments, ...created],
+        }),
+        async (r) => {
+          await r.upsertCourse(course);
+          for (const a of created) await r.upsertAssessment(a);
+        },
+      );
+      if (!saved) return storageFailure("The import wasn't saved. Try again.");
+
+      const createdIds = new Set(created.map((a) => a.id));
+      const parts = [
+        addedMeetings ? `${addedMeetings} class ${addedMeetings === 1 ? "time" : "times"}` : "",
+        created.length ? `${created.length} ${created.length === 1 ? "assessment" : "assessments"}` : "",
+      ].filter(Boolean);
+      showToast("info", `${course.code}: added ${parts.join(" and ") || "the course"}.`, async () => {
+        await commit(
+          (st) => ({
+            courses: previous ? st.courses.map((c) => (c.id === course.id ? previous! : c)) : st.courses.filter((c) => c.id !== course.id),
+            assessments: st.assessments.filter((a) => !createdIds.has(a.id)),
+          }),
+          async (r) => {
+            for (const id of createdIds) await r.deleteAssessment(id);
+            if (previous) await r.upsertCourse(previous);
+            else await r.deleteCourse(course.id);
+          },
+        );
+      });
+      return { ok: true, value: { course, meetings: addedMeetings, assessments: created.length } };
     },
 
     async importData(snapshot) {

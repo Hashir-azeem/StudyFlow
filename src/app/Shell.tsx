@@ -40,7 +40,8 @@ export function Shell() {
   const todayCount = overdue.length + dueToday.length;
 
   return (
-    <div className="flex h-full">
+    // relative z-10 keeps the app above the ambient particle layer.
+    <div className="relative z-10 flex h-full">
       <aside className="hidden w-60 shrink-0 flex-col gap-4 border-r border-border bg-surface p-4 md:flex">
         <div className="px-2 text-lg font-bold tracking-tight">StudyFlow</div>
         <PaletteButton />

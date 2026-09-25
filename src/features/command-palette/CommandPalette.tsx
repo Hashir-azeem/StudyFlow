@@ -5,7 +5,14 @@ import {
   CalendarRange,
   Check,
   Download,
+  FileUp,
+  Flame,
+  Flower2,
   ListChecks,
+  Pause,
+  Play,
+  Snowflake,
+  Ban,
   Monitor,
   Palette,
   Plus,
@@ -18,6 +25,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { ROUTES } from "../../app/routes";
 import { PALETTE_SHORTCUT } from "./hotkey";
+import { useAmbientMotion } from "../../ambient/motion";
 import { KIND_LABEL } from "../../core/assessments";
 import { formatDate } from "../../core/dates";
 import { parseQuickAdd, quickAddToDraft } from "../../core/quickAdd";
@@ -78,6 +86,10 @@ export function CommandPalette() {
   const createAssessment = useStore((s) => s.createAssessment);
   const exportData = useStore((s) => s.exportData);
   const showMessage = useStore((s) => s.showMessage);
+  const ambient = useStore((s) => s.settings.ambient);
+  const updateSettings = useStore((s) => s.updateSettings);
+  const openOutlineImport = useStore((s) => s.openOutlineImport);
+  const animating = useAmbientMotion();
   const courses = useActiveCourses();
   const courseMap = useCourseMap();
   const [query, setQuery] = useState("");
@@ -232,7 +244,42 @@ export function CommandPalette() {
           </Item>
         </Command.Group>
 
+        <Command.Group heading="Ambient background" className={groupClass}>
+          {(
+            [
+              ["snow", "Snowfall", Snowflake],
+              ["sakura", "Sakura petals", Flower2],
+              ["embers", "Embers", Flame],
+              ["none", "No ambient effect", Ban],
+            ] as const
+          ).map(([id, name, Icon]) => (
+            <Item
+              key={id}
+              value={`Ambient ${name}`}
+              keywords={["ambient", "particles", "background", "effect", "theme"]}
+              icon={<Icon className="h-4 w-4" />}
+              onSelect={run(() => updateSettings({ ambient: { ...ambient, effect: id } }))}
+              trailing={ambient.effect === id ? <Check className="h-4 w-4 text-accent" aria-label="Current" /> : undefined}
+            >
+              {name}
+            </Item>
+          ))}
+          {ambient.effect !== "none" ? (
+            <Item
+              value={animating ? "Pause ambient motion" : "Animate ambient background"}
+              keywords={["ambient", "motion", "animation", "reduce", "stop", "play"]}
+              icon={animating ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+              onSelect={run(() => updateSettings({ ambient: { ...ambient, motion: animating ? "off" : "on" } }))}
+            >
+              {animating ? "Pause ambient motion" : "Animate ambient background"}
+            </Item>
+          ) : null}
+        </Command.Group>
+
         <Command.Group heading="Data" className={groupClass}>
+          <Item value="Import course outline" keywords={["syllabus", "outline", "pdf", "docx", "import", "upload"]} icon={<FileUp className="h-4 w-4" />} onSelect={run(() => openOutlineImport(true))}>
+            Import course outline
+          </Item>
           <Item value="Save backup" keywords={["export", "download", "backup"]} icon={<Download className="h-4 w-4" />} onSelect={run(async () => {
               try {
                 if (await saveBackupFile(await exportData())) showMessage("info", "Backup saved.");

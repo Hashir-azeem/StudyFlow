@@ -8,13 +8,15 @@ See **AUDIT.md** for what was wrong with the first Cursor-generated version and 
 
 ```bash
 rm -rf node_modules && npm install     # node_modules from another OS won't work
-npm test                               # 40 unit tests
+npm test                               # unit tests (core, ambient, outline parser)
 npm run dev                            # browser, IndexedDB storage
 npx tauri icon src-tauri/app-icon.png  # generates src-tauri/icons/* (needed once)
 npm run tauri dev                      # desktop app, SQLite storage
 ```
 
 To install StudyFlow as a normal desktop app with automatic updates, follow **DESKTOP.md**.
+
+Ambient particle backgrounds and course-outline import are described in **docs/ambient-and-outline-import.md**.
 
 Mobile: `npx tauri android init` / `npx tauri ios init`, then `npm run tauri android dev`.
 

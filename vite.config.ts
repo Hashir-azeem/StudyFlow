@@ -23,6 +23,8 @@ export default defineConfig({
     watch: { ignored: ["**/src-tauri/**"] },
   },
   envPrefix: ["VITE_", "TAURI_ENV_*"],
+  // The ambient particle worker is created with { type: "module" }; emit it as an ES module to match.
+  worker: { format: "es" },
   build: {
     // WebView2 (Chromium) on Windows; WebKit on macOS, iOS, and Linux.
     target: process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome105" : "safari15",

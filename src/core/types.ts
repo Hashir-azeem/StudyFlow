@@ -134,6 +134,19 @@ export interface Settings {
   timeFormat: TimeFormat;
   /** Overrides the theme's accent color; null uses the theme's own. */
   accent: HexColor | null;
+  ambient: AmbientSettings;
+}
+
+export const AMBIENT_EFFECTS = ["none", "snow", "sakura", "embers"] as const;
+export type AmbientEffect = (typeof AMBIENT_EFFECTS)[number];
+/** "auto" animates unless the OS asks for reduced motion. */
+export type AmbientMotion = "auto" | "on" | "off";
+export type AmbientIntensity = 1 | 2 | 3 | 4 | 5;
+
+export interface AmbientSettings {
+  effect: AmbientEffect;
+  motion: AmbientMotion;
+  intensity: AmbientIntensity;
 }
 
 export type TimeFormat = "auto" | "12h" | "24h";
@@ -145,6 +158,7 @@ export const DEFAULT_SETTINGS: Settings = {
   notifications: false,
   timeFormat: "auto",
   accent: null,
+  ambient: { effect: "none", motion: "auto", intensity: 3 },
 };
 
 /** Full export format; also the migration payload between storage backends. */

@@ -1,4 +1,4 @@
-import { Plus } from "lucide-react";
+import { FileUp, Plus } from "lucide-react";
 import { useMemo, useState } from "react";
 import { trackAll, weightSummary } from "../../core/assessments";
 import { formatRelative, weekdayShort } from "../../core/dates";
@@ -80,6 +80,7 @@ export function CoursesView() {
   const courses = useStore((s) => s.courses);
   const assessments = useStore((s) => s.assessments);
   const openCourseDialog = useStore((s) => s.openCourseDialog);
+  const openOutlineImport = useStore((s) => s.openOutlineImport);
   const [showArchived, setShowArchived] = useState(false);
 
   const sorted = useMemo(() => [...courses].sort((a, b) => a.code.localeCompare(b.code)), [courses]);
@@ -90,9 +91,14 @@ export function CoursesView() {
     <div className="mx-auto flex max-w-6xl flex-col gap-6">
       <header className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-3xl font-semibold tracking-tight">Courses</h1>
-        <Button variant="primary" onClick={() => openCourseDialog({ mode: "create" })}>
-          <Plus className="h-4 w-4" /> Add course
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button onClick={() => openOutlineImport(true)}>
+            <FileUp className="h-4 w-4" /> Import outline
+          </Button>
+          <Button variant="primary" onClick={() => openCourseDialog({ mode: "create" })}>
+            <Plus className="h-4 w-4" /> Add course
+          </Button>
+        </div>
       </header>
 
       {active.length === 0 ? (

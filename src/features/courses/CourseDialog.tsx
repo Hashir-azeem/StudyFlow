@@ -13,7 +13,7 @@ import { useResolvedTheme } from "../../theme/useResolvedTheme";
 
 const DAYS: Weekday[] = [1, 2, 3, 4, 5, 6, 0];
 
-function ColorPicker({ value, onChange, error }: { value: string; onChange: (hex: string) => void; error?: string }) {
+export function ColorPicker({ value, onChange, error }: { value: string; onChange: (hex: string) => void; error?: string }) {
   const palette = useResolvedTheme().coursePalette;
   const current = normalizeHex(value) ?? "#64748b";
   return (
@@ -157,6 +157,7 @@ export function CourseDialog() {
   const updateCourse = useStore((s) => s.updateCourse);
   const setArchived = useStore((s) => s.setCourseArchived);
   const deleteCourse = useStore((s) => s.deleteCourse);
+  const openOutlineImport = useStore((s) => s.openOutlineImport);
 
   const editing = dialog?.mode === "edit" ? courses.find((c) => c.id === dialog.id) ?? null : null;
   const [draft, setDraft] = useState<CourseDraft>(() => blankCourse(courses));
@@ -251,6 +252,18 @@ export function CourseDialog() {
         }}
       >
         {errors.form ? <p role="alert" className="rounded-lg bg-danger/10 px-3 py-2 text-sm text-danger">{errors.form}</p> : null}
+        {!editing ? (
+          <button
+            type="button"
+            onClick={() => {
+              close();
+              openOutlineImport(true);
+            }}
+            className="self-start text-sm font-medium text-accent hover:underline"
+          >
+            Import classes and deadlines from a course outline instead
+          </button>
+        ) : null}
         <div className="grid gap-4 sm:grid-cols-[1fr_2fr]">
           <Field label="Code" error={errors.code}>
             {(p) => <Input {...p} autoFocus placeholder="CS 101" value={draft.code} onChange={(e) => set("code", e.target.value)} />}

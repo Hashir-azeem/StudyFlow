@@ -1,7 +1,17 @@
 import { isHexColor, normalizeHex } from "../core/colors";
 import { coerceAssessment, coerceCourse } from "../core/validation";
-import { DEFAULT_SETTINGS, THEME_IDS, type Settings, type Snapshot } from "../core/types";
+import { AMBIENT_EFFECTS, DEFAULT_SETTINGS, THEME_IDS, type AmbientSettings, type Settings, type Snapshot } from "../core/types";
 import { StorageError } from "./repository";
+
+function coerceAmbient(raw: unknown): AmbientSettings {
+  const r = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const intensity = Number(r.intensity);
+  return {
+    effect: AMBIENT_EFFECTS.includes(r.effect as never) ? (r.effect as AmbientSettings["effect"]) : "none",
+    motion: r.motion === "on" || r.motion === "off" ? r.motion : "auto",
+    intensity: Number.isInteger(intensity) && intensity >= 1 && intensity <= 5 ? (intensity as AmbientSettings["intensity"]) : 3,
+  };
+}
 
 export function coerceSettings(raw: unknown): Settings {
   if (!raw || typeof raw !== "object") return { ...DEFAULT_SETTINGS };
@@ -18,6 +28,7 @@ export function coerceSettings(raw: unknown): Settings {
     notifications: r.notifications === true,
     timeFormat: r.timeFormat === "12h" || r.timeFormat === "24h" ? r.timeFormat : "auto",
     accent: typeof r.accent === "string" && isHexColor(normalizeHex(r.accent)) ? normalizeHex(r.accent) : null,
+    ambient: coerceAmbient(r.ambient),
   };
 }
 

@@ -5,6 +5,10 @@ import type { Theme, ThemeId } from "../core/types";
  * Every token is an "R G B" triplet consumed as rgb(var(--c-*)) so Tailwind
  * opacity modifiers (bg-accent/10) work. Add a theme by adding an entry here;
  * nothing else needs to change.
+ *
+ * Muted text is set well above the 4.5:1 minimum (7:1 on light themes, 8.5:1
+ * on dark ones) so the ambient particle layer has contrast headroom to use.
+ * tests/ambient.test.ts fails if a theme leaves an effect too faint.
  */
 export const THEMES: Record<ThemeId, Theme> = {
   light: {
@@ -17,7 +21,7 @@ export const THEMES: Record<ThemeId, Theme> = {
       surface2: "236 239 244",
       border: "220 224 232",
       text: "22 27 38",
-      muted: "92 100 117",
+      muted: "74 80 94",
       accent: "52 88 214",
       accentFg: "255 255 255",
       danger: "200 45 60",
@@ -36,7 +40,7 @@ export const THEMES: Record<ThemeId, Theme> = {
       surface2: "32 37 50",
       border: "46 52 68",
       text: "232 235 242",
-      muted: "150 158 176",
+      muted: "173 180 194",
       accent: "132 156 255",
       accentFg: "16 19 27",
       danger: "255 120 130",
@@ -55,7 +59,7 @@ export const THEMES: Record<ThemeId, Theme> = {
       surface2: "242 236 249",
       border: "229 220 240",
       text: "44 36 64",
-      muted: "110 100 134",
+      muted: "86 78 105",
       accent: "132 94 196",
       accentFg: "255 255 255",
       danger: "196 64 96",
@@ -77,7 +81,7 @@ export const THEMES: Record<ThemeId, Theme> = {
       surface2: "46 27 74",
       border: "72 45 106",
       text: "246 234 255",
-      muted: "188 162 216",
+      muted: "193 169 219",
       accent: "255 92 190",
       accentFg: "22 13 38",
       danger: "255 105 120",
@@ -99,7 +103,7 @@ export const THEMES: Record<ThemeId, Theme> = {
       surface2: "240 240 240",
       border: "224 224 224",
       text: "20 20 20",
-      muted: "108 108 108",
+      muted: "82 82 82",
       accent: "20 20 20",
       accentFg: "255 255 255",
       danger: "180 30 30",

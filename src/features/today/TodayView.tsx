@@ -1,4 +1,4 @@
-import { MapPin, Plus } from "lucide-react";
+import { FileUp, MapPin, Plus } from "lucide-react";
 import { formatDate } from "../../core/dates";
 import type { ClassStatus } from "../../core/schedule";
 import { Button } from "../../components/ui/Button";
@@ -31,6 +31,7 @@ export function TodayView() {
   const openCourseDialog = useStore((s) => s.openCourseDialog);
   const openAssessmentDialog = useStore((s) => s.openAssessmentDialog);
   const loadSampleData = useStore((s) => s.loadSampleData);
+  const openOutlineImport = useStore((s) => s.openOutlineImport);
   const courses = useActiveCourses();
   const classes = useTodayClasses();
   const tracker = useTracker();
@@ -40,10 +41,13 @@ export function TodayView() {
       <div className="mx-auto flex max-w-md flex-col items-center gap-4 py-24 text-center">
         <h1 className="text-2xl font-semibold">Add your first course</h1>
         <p className="text-sm text-muted">
-          Enter the course code, when it meets, and a color. Your classes, deadlines, and exams will fill this page.
+          Import your course outline to pull in class times and exam dates automatically, or enter a course by hand.
         </p>
         <div className="flex flex-wrap justify-center gap-2">
-          <Button variant="primary" onClick={() => openCourseDialog({ mode: "create" })}>
+          <Button variant="primary" onClick={() => openOutlineImport(true)}>
+            <FileUp className="h-4 w-4" /> Import course outline
+          </Button>
+          <Button onClick={() => openCourseDialog({ mode: "create" })}>
             <Plus className="h-4 w-4" /> Add course
           </Button>
           <Button variant="ghost" onClick={() => void loadSampleData()}>

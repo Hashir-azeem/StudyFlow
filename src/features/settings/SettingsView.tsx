@@ -1,6 +1,9 @@
-import { Check, Download, Monitor, Upload } from "lucide-react";
+import { Ban, Check, Download, Flame, Flower2, Monitor, Snowflake, Upload, type LucideIcon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import type { Snapshot, ThemePreference } from "../../core/types";
+import type { AmbientEffect, AmbientIntensity, AmbientMotion, Snapshot, ThemePreference } from "../../core/types";
+import { usePrefersReducedMotion } from "../../ambient/motion";
+import { ambientPalette } from "../../core/ambient";
+import { useResolvedTheme } from "../../theme/useResolvedTheme";
 import { Button } from "../../components/ui/Button";
 import { cx } from "../../components/ui/cx";
 import { Dialog } from "../../components/ui/Dialog";
@@ -167,6 +170,101 @@ function AccentPicker() {
         </label>
       </div>
     </div>
+  );
+}
+
+const EFFECT_OPTIONS: Array<{ id: AmbientEffect; name: string; icon: LucideIcon; blurb: string }> = [
+  { id: "none", name: "Off", icon: Ban, blurb: "Plain background" },
+  { id: "snow", name: "Snowfall", icon: Snowflake, blurb: "Soft drifting flakes" },
+  { id: "sakura", name: "Sakura", icon: Flower2, blurb: "Tumbling petals" },
+  { id: "embers", name: "Embers", icon: Flame, blurb: "Warm rising sparks" },
+];
+
+const INTENSITY_LABEL: Record<AmbientIntensity, string> = { 1: "Sparse", 2: "Light", 3: "Medium", 4: "Full", 5: "Heavy" };
+
+function AmbientSection() {
+  const ambient = useStore((s) => s.settings.ambient);
+  const updateSettings = useStore((s) => s.updateSettings);
+  const reducedMotion = usePrefersReducedMotion();
+  const theme = useResolvedTheme();
+  const set = (patch: Partial<typeof ambient>) => void updateSettings({ ambient: { ...ambient, ...patch } });
+  const layer = ambient.effect === "none" ? null : ambientPalette(ambient.effect, theme).layerOpacity;
+  const motionHint =
+    ambient.motion === "auto"
+      ? reducedMotion
+        ? "Your system asks for reduced motion, so particles stay still."
+        : "Follows your system's reduce-motion setting."
+      : ambient.motion === "off"
+        ? "Particles are shown as a still scene."
+        : undefined;
+
+  return (
+    <Section
+      title="Ambient background"
+      description="A living backdrop behind your schedule. Particles are dimmed for each theme so text keeps WCAG AA contrast."
+    >
+      <div role="radiogroup" aria-label="Ambient effect" className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        {EFFECT_OPTIONS.map(({ id, name, icon: Icon, blurb }) => (
+          <button
+            key={id}
+            type="button"
+            role="radio"
+            aria-checked={ambient.effect === id}
+            onClick={() => set({ effect: id })}
+            className={cx(
+              "flex flex-col items-start gap-1 rounded-xl border p-3 text-left",
+              ambient.effect === id ? "border-accent bg-accent/10 ring-2 ring-accent/30" : "border-border hover:border-muted",
+            )}
+          >
+            <Icon className={cx("h-5 w-5", ambient.effect === id ? "text-accent" : "text-muted")} aria-hidden />
+            <span className="text-sm font-medium">{name}</span>
+            <span className="text-xs text-muted">{blurb}</span>
+          </button>
+        ))}
+      </div>
+
+      {ambient.effect !== "none" ? (
+        <div className="mt-3 border-t border-border pt-2">
+          <Row label="Motion" hint={motionHint}>
+            <div role="radiogroup" aria-label="Motion" className="flex rounded-lg bg-surface-2 p-0.5">
+              {(["auto", "on", "off"] as AmbientMotion[]).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  role="radio"
+                  aria-checked={ambient.motion === m}
+                  onClick={() => set({ motion: m })}
+                  className={cx(
+                    "rounded-md px-3 py-1 text-sm font-medium",
+                    ambient.motion === m ? "bg-surface text-text shadow-sm" : "text-muted hover:text-text",
+                  )}
+                >
+                  {m === "auto" ? "Automatic" : m === "on" ? "Animate" : "Still"}
+                </button>
+              ))}
+            </div>
+          </Row>
+          <Row label="Density" hint={INTENSITY_LABEL[ambient.intensity]}>
+            <input
+              type="range"
+              min={1}
+              max={5}
+              step={1}
+              value={ambient.intensity}
+              onChange={(e) => set({ intensity: Number(e.target.value) as AmbientIntensity })}
+              aria-label="Particle density"
+              aria-valuetext={INTENSITY_LABEL[ambient.intensity]}
+              className="w-40 accent-[rgb(var(--c-accent))]"
+            />
+          </Row>
+          {layer !== null && layer < 0.25 ? (
+            <p className="text-xs text-muted">
+              This theme leaves little contrast headroom, so particles are kept faint to protect readability.
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+    </Section>
   );
 }
 
@@ -442,6 +540,7 @@ export function SettingsView() {
         </Row>
       </Section>
 
+      <AmbientSection />
       <RemindersSection />
       <BackupSection />
       <AboutSection />
