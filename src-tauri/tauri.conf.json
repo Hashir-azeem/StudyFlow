@@ -50,7 +50,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg4NTJDOUM3NzM4QzE0RkYKUld",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg4NTJDOUM3NzM4QzE0RkYKUldUL0ZJeHp4OGxTaURnY3p5MjkwWHZjeG5rUVNGR0tRZTRuQ0tka3FBeHd1c0xWNWV3WnRhWG0K",
       "endpoints": [
         "https://github.com/Hashir-azeem/StudyFlow/releases/latest/download/latest.json"
       ],
