@@ -10,11 +10,19 @@ src/ambient/driver.ts          Picks worker or main thread; one interface for bo
 src/ambient/motion.ts          Reduced-motion + user preference → animate or still
 src/ambient/AmbientBackground.tsx  Mounts the layer; reacts to settings and theme
 
+src/core/outline/types.ts        Schema v2 (also docs/outline-schema.json)
 src/core/outline/text.ts         Pure recognisers: days, times, dates, weights, rooms
-src/core/outline/parseOutline.ts Pure parser: text → ParsedOutline
+src/core/outline/sections.ts     Labels each line: grading / schedule / policy / materials / contact
+src/core/outline/instructors.ts  Every person with a teaching role, ranked
+src/core/outline/meetings.ts     Weekly recurring rules (dated rows folded into patterns)
+src/core/outline/recurrence.ts   Day normalisation, day ranges, RRULE, validation
+src/core/outline/assessments.ts  Graded work; weights only from the grading section
+src/core/outline/weights.ts      Verify counted weights against 100%
+src/core/outline/sanitize.ts     Gate for any extractor's output; recomputes derived fields
+src/core/outline/parseOutline.ts Orchestrates the above: text → ParsedOutline
 src/platform/outlineReader.ts    File → text (pdf.js / mammoth / TextDecoder) → parse, in memory
 src/features/import/OutlineImportDialog.tsx  Pick → read → review flow
-src/features/import/OutlineReview.tsx        Edit and approve before anything is saved
+src/features/import/OutlineReview.tsx        4-step confirmation: course & instructor → schedule → assessment scheme → confirm
 src/state/store.ts  applyOutlineImport()     Saves the approved plan as one change, with Undo
 ```
 
@@ -60,3 +68,25 @@ What the rules handle today:
 - **Not supported:**
   - Scanned PDFs, which need OCR. The student gets a clear message.
   - Old .doc files. The student is asked to save as .docx or PDF.
+
+## Parser v2 fixes
+
+- **Several instructors.** Every person with a teaching role is returned as a candidate: lecturer, coordinator, lab, tutorial, TA, or listed. Each keeps its section number where the outline gives one. The student picks their instructor, types someone else, or leaves it blank.
+- **Recurring classes.** Meetings are weekly rules: `{ daysOfWeek: ["TU","TH"], startTime, endTime }`, plus an RFC 5545 `rrule`.
+  - Day ranges ("Mon-Fri", "M-F", "Fri-Mon") expand, and Saturday and Sunday work like any other day.
+  - A schedule that lists lectures by date is folded into the weekly pattern. A stated pattern ("Tues/Thurs") wins over the weekdays of dated rows.
+  - A partial schedule never ends the term early; the last dated row sets the end only if it spans 8+ weeks.
+  - A session seen on a single date is flagged `oneOff` and left unticked.
+- **Weights over 100%.** When the outline has an Evaluation/Grading section, only its weights count. A weight seen elsewhere is kept as `mentionedWeight`, visible but not summed.
+  - Bonus, optional, and extra-credit items, and the dropped part of "best 8 of 10", are excluded from the total.
+  - A "Total 100%" row is read as `declaredTotal` and compared.
+  - Historical averages and policy sentences are ignored.
+  - The review screen re-checks the total live. Saving with a total over 100% requires explicit confirmation.
+  - Bonus and dropped items are saved without a weight, so the course stays at 100%.
+- **Noise.**
+  - Lines are labelled by section. Policy, textbook, and contact text never produce classes or assessments.
+  - An "Office Hours:" label claims the next few lines, so a time written on the following line isn't imported as a class.
+
+## Adding an assessment without a course
+
+The assessment form's course menu has **+ New course…**, and it opens automatically when there are no courses yet. Code, name, and colour are entered inline, and one save creates the course and then the assessment. The assessment is validated first, so a mistake there never leaves a stray course behind.

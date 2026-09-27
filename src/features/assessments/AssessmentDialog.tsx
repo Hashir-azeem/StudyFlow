@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { KIND_LABEL, weightSummary } from "../../core/assessments";
-import { blankAssessment, KIND_DEFAULTS } from "../../core/templates";
+import { blankAssessment, blankCourse, KIND_DEFAULTS } from "../../core/templates";
+import { validateAssessment } from "../../core/validation";
+import { ColorPicker } from "../courses/CourseDialog";
 import {
   ASSESSMENT_KINDS,
   PRIORITIES,
@@ -15,6 +17,8 @@ import { Field, Input, Select, Textarea } from "../../components/ui/Field";
 import { useActiveCourses } from "../../state/hooks";
 import { useStore } from "../../state/store";
 
+const NEW_COURSE = "__new_course__";
+
 /** Parse a numeric field: blank → null, otherwise a finite number or NaN (caught by validation). */
 function parseNumber(value: string): number | null {
   return value.trim() === "" ? null : Number(value);
@@ -26,7 +30,7 @@ export function AssessmentDialog() {
   const allCourses = useStore((s) => s.courses);
   const today = useStore((s) => s.today);
   const open = useStore((s) => s.openAssessmentDialog);
-  const openCourseDialog = useStore((s) => s.openCourseDialog);
+  const createCourse = useStore((s) => s.createCourse);
   const createAssessment = useStore((s) => s.createAssessment);
   const updateAssessment = useStore((s) => s.updateAssessment);
   const deleteAssessment = useStore((s) => s.deleteAssessment);
@@ -38,6 +42,12 @@ export function AssessmentDialog() {
   const [saving, setSaving] = useState(false);
   /** Once the user touches priority/weight, changing the kind stops overwriting them. */
   const [touched, setTouched] = useState({ priority: false, weight: false });
+  /**
+   * Inline "new course" for when the right course doesn't exist yet (or none
+   * do). Every assessment still belongs to a course: both are created on save.
+   */
+  const [newCourse, setNewCourse] = useState<{ code: string; name: string; color: string } | null>(null);
+  const blankNewCourse = () => ({ code: "", name: "", color: blankCourse(allCourses).color });
 
   const dialogKey = dialog ? (dialog.mode === "edit" ? `e:${dialog.id}` : `c:${JSON.stringify(dialog.prefill ?? {})}`) : null;
   useEffect(() => {
@@ -47,11 +57,13 @@ export function AssessmentDialog() {
       const { id: _id, createdAt: _c, updatedAt: _u, ...rest } = editing;
       setDraft(rest);
       setTouched({ priority: true, weight: true });
+      setNewCourse(null);
     } else {
       const prefill = dialog.prefill ?? {};
       const courseId = prefill.courseId ?? activeCourses[0]?.id ?? "";
       setDraft({ ...blankAssessment(courseId, today, prefill.kind), ...prefill, courseId });
       setTouched({ priority: prefill.priority !== undefined, weight: prefill.weight !== undefined });
+      setNewCourse(courseId ? null : blankNewCourse());
     }
     setErrors({});
     // eslint-disable-next-line react-hooks/exhaustive-deps -- reset only when the target changes
@@ -76,16 +88,6 @@ export function AssessmentDialog() {
 
   const close = () => open(null);
 
-  if (dialog && activeCourses.length === 0 && !editing) {
-    return (
-      <Dialog open onOpenChange={(o) => !o && close()} title="Add a course first" description="Assessments belong to a course, so you'll need at least one.">
-        <Button variant="primary" onClick={() => { close(); openCourseDialog({ mode: "create" }); }}>
-          Add course
-        </Button>
-      </Dialog>
-    );
-  }
-
   const update = <K extends keyof AssessmentDraft>(key: K, value: AssessmentDraft[K]) =>
     setDraft((d) => (d ? { ...d, [key]: value } : d));
 
@@ -105,8 +107,31 @@ export function AssessmentDialog() {
   async function save() {
     if (!draft) return;
     setSaving(true);
+    setErrors({});
     try {
-      const result = editing ? await updateAssessment(editing.id, draft) : await createAssessment(draft);
+      let courseId = draft.courseId;
+      if (!editing && newCourse) {
+        // Check the assessment first so a typo there doesn't leave a stray new course behind.
+        const pre = validateAssessment(draft, allCourses);
+        if (!pre.ok) {
+          const { courseId: _ignored, ...rest } = pre.errors;
+          if (Object.keys(rest).length) {
+            setErrors(rest);
+            return;
+          }
+        }
+        const created = await createCourse({ ...blankCourse(allCourses), code: newCourse.code, name: newCourse.name, color: newCourse.color });
+        if (!created.ok) {
+          setErrors(Object.fromEntries(Object.entries(created.errors).map(([k, v]) => [`course.${k}`, v])));
+          return;
+        }
+        courseId = created.value.id;
+        // If the assessment save below fails, the course now exists: select it for the retry.
+        setNewCourse(null);
+        setDraft((d) => (d ? { ...d, courseId } : d));
+      }
+      const next = { ...draft, courseId };
+      const result = editing ? await updateAssessment(editing.id, next) : await createAssessment(next);
       if (result.ok) close();
       else setErrors(result.errors);
     } finally {
@@ -140,15 +165,44 @@ export function AssessmentDialog() {
             {(p) => <Input {...p} autoFocus placeholder="Midterm 1" value={draft.title} onChange={(e) => update("title", e.target.value)} />}
           </Field>
           <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="Course" error={errors.courseId}>
+            <Field label="Course" error={newCourse ? undefined : errors.courseId}>
               {(p) => (
-                <Select {...p} value={draft.courseId} onChange={(e) => update("courseId", e.target.value)}>
+                <Select
+                  {...p}
+                  value={newCourse ? NEW_COURSE : draft.courseId}
+                  onChange={(e) => {
+                    if (e.target.value === NEW_COURSE) setNewCourse(blankNewCourse());
+                    else {
+                      setNewCourse(null);
+                      update("courseId", e.target.value);
+                    }
+                  }}
+                >
                   {courseOptions.map((c) => (
                     <option key={c.id} value={c.id}>{c.code}: {c.name}</option>
                   ))}
+                  {!editing ? <option value={NEW_COURSE}>+ New course…</option> : null}
                 </Select>
               )}
             </Field>
+            {newCourse ? (
+              <div className="flex flex-col gap-3 rounded-xl border border-dashed border-accent/50 bg-accent/5 p-3 sm:col-span-2">
+                <p className="text-xs text-muted">
+                  {activeCourses.length === 0
+                    ? "Every assessment belongs to a course, so name it here. Both are created when you save."
+                    : "The new course is created when you save. You can add its class times later."}
+                </p>
+                <div className="grid gap-3 sm:grid-cols-[1fr_2fr]">
+                  <Field label="Course code" error={errors["course.code"]}>
+                    {(p) => <Input {...p} placeholder="CPS 109" value={newCourse.code} onChange={(e) => setNewCourse({ ...newCourse, code: e.target.value })} />}
+                  </Field>
+                  <Field label="Course name" error={errors["course.name"]}>
+                    {(p) => <Input {...p} placeholder="Computer Science I" value={newCourse.name} onChange={(e) => setNewCourse({ ...newCourse, name: e.target.value })} />}
+                  </Field>
+                </div>
+                <ColorPicker value={newCourse.color} onChange={(color) => setNewCourse({ ...newCourse, color })} error={errors["course.color"]} />
+              </div>
+            ) : null}
             <Field label="Type" error={errors.kind}>
               {(p) => (
                 <Select {...p} value={draft.kind} onChange={(e) => changeKind(e.target.value as AssessmentKind)}>

@@ -1,4 +1,4 @@
-import { Plus } from "lucide-react";
+import { FileUp, Plus } from "lucide-react";
 import { useMemo, useState } from "react";
 import { weightSummary } from "../../core/assessments";
 import { compareDateTime, formatDate } from "../../core/dates";
@@ -29,6 +29,7 @@ export function AssessmentsView() {
   const assessments = useStore((s) => s.assessments);
   const today = useStore((s) => s.today);
   const openAssessmentDialog = useStore((s) => s.openAssessmentDialog);
+  const openOutlineImport = useStore((s) => s.openOutlineImport);
   const courses = useActiveCourses();
   const [status, setStatus] = useState<StatusFilter>("open");
   const [courseFilter, setCourseFilter] = useState<ID | null>(null);
@@ -146,9 +147,17 @@ export function AssessmentsView() {
       </div>
 
       {courses.length === 0 ? (
-        <p className="rounded-2xl border border-dashed border-border px-4 py-12 text-center text-sm text-muted">
-          Add a course first. Assessments always belong to one.
-        </p>
+        <div className="flex flex-col items-center gap-3 rounded-2xl border border-dashed border-border px-4 py-12 text-center">
+          <p className="text-sm text-muted">No assessments yet. Add one and name its course in the same step, or import an outline.</p>
+          <div className="flex flex-wrap justify-center gap-2">
+            <Button variant="primary" onClick={() => openAssessmentDialog({ mode: "create" })}>
+              <Plus className="h-4 w-4" /> Add assessment
+            </Button>
+            <Button onClick={() => openOutlineImport(true)}>
+              <FileUp className="h-4 w-4" /> Import course outline
+            </Button>
+          </div>
+        </div>
       ) : total === 0 ? (
         <p className="rounded-2xl border border-dashed border-border px-4 py-12 text-center text-sm text-muted">
           {status === "done"

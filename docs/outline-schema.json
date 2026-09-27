@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://studyflow.app/schemas/parsed-outline-v2.json",
+  "title": "ParsedOutline",
+  "description": "Structured result of reading a course outline (schema v2). Produced by the on-device parser; any other extractor must emit this shape and pass through sanitizeOutline() before review. Raw document text is never part of it; `source` fields hold the single matched line for review only and are never saved.",
+  "type": "object",
+  "required": ["schemaVersion", "course", "instructors", "termStart", "termEnd", "meetings", "assessments", "weightCheck", "gradingSectionFound", "warnings"],
+  "additionalProperties": false,
+  "$defs": {
+    "isoDate": { "type": ["string", "null"], "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+    "time": { "type": "string", "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$" },
+    "dayCode": { "enum": ["MO", "TU", "WE", "TH", "FR", "SA", "SU"] }
+  },
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "course": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "name", "term"],
+      "properties": {
+        "code": { "type": ["string", "null"], "examples": ["CPS 109"] },
+        "name": { "type": ["string", "null"] },
+        "term": { "type": ["string", "null"], "examples": ["Fall 2026"] }
+      }
+    },
+    "instructors": {
+      "description": "Every person named with a teaching role, primary lecturers first. The student picks one during review.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name", "role", "section", "source"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string", "maxLength": 80 },
+          "role": { "enum": ["instructor", "coordinator", "lab", "tutorial", "ta", "other"] },
+          "section": { "type": ["string", "null"], "examples": ["011"] },
+          "source": { "type": "string" }
+        }
+      }
+    },
+    "termStart": { "$ref": "#/$defs/isoDate" },
+    "termEnd": { "$ref": "#/$defs/isoDate" },
+    "meetings": {
+      "description": "Weekly recurring classes, not isolated events.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "daysOfWeek", "startTime", "endTime", "kind", "location", "startDate", "endDate", "rrule", "oneOff", "source"],
+        "properties": {
+          "id": { "type": "string" },
+          "daysOfWeek": { "type": "array", "items": { "$ref": "#/$defs/dayCode" }, "minItems": 1, "uniqueItems": true },
+          "startTime": { "$ref": "#/$defs/time" },
+          "endTime": { "$ref": "#/$defs/time" },
+          "kind": { "enum": ["lecture", "lab", "tutorial", "seminar"] },
+          "location": { "type": ["string", "null"] },
+          "startDate": { "$ref": "#/$defs/isoDate" },
+          "endDate": { "$ref": "#/$defs/isoDate" },
+          "rrule": { "type": "string", "pattern": "^FREQ=WEEKLY;", "examples": ["FREQ=WEEKLY;BYDAY=TU,TH;UNTIL=20261207T235959"] },
+          "oneOff": { "type": "boolean", "description": "Seen on a single date only; offered unticked." },
+          "source": { "type": "string" }
+        }
+      }
+    },
+    "assessments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "kind", "date", "week", "weekday", "time", "weight", "mentionedWeight", "optional", "flags", "source"],
+        "properties": {
+          "id": { "type": "string" },
+          "title": { "type": "string", "maxLength": 200 },
+          "kind": { "enum": ["exam", "midterm", "quiz", "project", "assignment", "task"] },
+          "date": { "$ref": "#/$defs/isoDate" },
+          "week": { "type": ["integer", "null"], "minimum": 1, "maximum": 20 },
+          "weekday": { "type": ["integer", "null"], "minimum": 0, "maximum": 6, "description": "0 = Sunday" },
+          "time": { "type": ["string", "null"], "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$" },
+          "weight": { "type": ["number", "null"], "exclusiveMinimum": 0, "maximum": 100, "description": "Counted weight; from the grading section when one exists." },
+          "mentionedWeight": { "type": ["number", "null"], "description": "Weight seen outside the grading section; shown, not counted." },
+          "optional": { "type": "boolean", "description": "Bonus / extra credit / optional: never counted toward 100%." },
+          "flags": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "enum": ["optional", "dropped", "outside-grading", "tba", "week-only"] }
+          },
+          "source": { "type": "string" }
+        }
+      }
+    },
+    "weightCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "declaredTotal", "status", "difference"],
+      "description": "Recomputed by sanitizeOutline(); extractor-supplied values other than declaredTotal are ignored.",
+      "properties": {
+        "total": { "type": "number" },
+        "declaredTotal": { "type": ["number", "null"] },
+        "status": { "enum": ["exact", "under", "over", "none"] },
+        "difference": { "type": "number", "description": "total − 100" }
+      }
+    },
+    "gradingSectionFound": { "type": "boolean" },
+    "warnings": { "type": "array", "items": { "type": "string" } }
+  }
+}

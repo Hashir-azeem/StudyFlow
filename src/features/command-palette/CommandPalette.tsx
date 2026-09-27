@@ -199,7 +199,7 @@ export function CommandPalette() {
                 trailing="Finish in form"
               >
                 {courses.length === 0
-                  ? "Add a course first, then quick add works with its code"
+                  ? `Add "${parse.title || "assessment"}" and name its course`
                   : quick && !quick.ok && quick.missing.includes("course")
                     ? `Add "${parse.title || "assessment"}", then pick a course`
                     : "Add an assessment, then give it a title"}

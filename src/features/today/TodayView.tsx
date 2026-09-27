@@ -41,11 +41,14 @@ export function TodayView() {
       <div className="mx-auto flex max-w-md flex-col items-center gap-4 py-24 text-center">
         <h1 className="text-2xl font-semibold">Add your first course</h1>
         <p className="text-sm text-muted">
-          Import your course outline to pull in class times and exam dates automatically, or enter a course by hand.
+          Import your course outline to pull in class times and exam dates automatically, or add a deadline or a course by hand.
         </p>
         <div className="flex flex-wrap justify-center gap-2">
           <Button variant="primary" onClick={() => openOutlineImport(true)}>
             <FileUp className="h-4 w-4" /> Import course outline
+          </Button>
+          <Button onClick={() => openAssessmentDialog({ mode: "create", prefill: { dueDate: today } })}>
+            <Plus className="h-4 w-4" /> Add assessment
           </Button>
           <Button onClick={() => openCourseDialog({ mode: "create" })}>
             <Plus className="h-4 w-4" /> Add course

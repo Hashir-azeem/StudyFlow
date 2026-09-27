@@ -1,5 +1,6 @@
 import { addDays, diffInDays, isISODate, startOfWeek } from "../dates";
 import type { ISODate, TimeOfDay, Weekday } from "../types";
+import { codeToWeekday, expandDayRange, normalizeDayToken } from "./recurrence";
 
 /**
  * Recognisers for the fragments course outlines are made of. Each works on a
@@ -32,8 +33,22 @@ const COMPACT = /\b(?:Th|Tu|Sa|Su|M|T|W|R|F|S|U)+\b/g;
 const COMPACT_PART = /Th|Tu|Sa|Su|M|T|W|R|F|S|U/g;
 const COMPACT_INDEX: Record<string, Weekday> = { M: 1, T: 2, Tu: 2, W: 3, R: 4, Th: 4, F: 5, S: 6, Sa: 6, U: 0, Su: 0 };
 
+/** "Mon-Fri", "Monday to Thursday", "M-F", "Tu–Th" (ranges, not pairs). */
+const DAY_WORD_RANGE = /\b(mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?\s*(?:-|to|through|thru)\s*(mon|tue|wed|thu|fri|sat|sun)[a-z]*\b/gi;
+const COMPACT_RANGE = /\b(Th|Tu|Sa|Su|M|T|W|R|F|S|U)\s?-\s?(Th|Tu|Sa|Su|M|T|W|R|F|S|U)\b/g;
+
 export function findDays(line: string): Weekday[] {
   const days = new Set<Weekday>();
+  for (const m of line.matchAll(DAY_WORD_RANGE)) {
+    const from = normalizeDayToken(m[1]);
+    const to = normalizeDayToken(m[2]);
+    if (from && to) expandDayRange(from, to).forEach((c) => days.add(codeToWeekday(c)));
+  }
+  for (const m of line.matchAll(COMPACT_RANGE)) {
+    const from = normalizeDayToken(m[1]);
+    const to = normalizeDayToken(m[2]);
+    if (from && to) expandDayRange(from, to).forEach((c) => days.add(codeToWeekday(c)));
+  }
   for (const m of line.matchAll(DAY_WORD)) days.add(DAY_INDEX[m[1]!.slice(0, 3).toLowerCase()]!);
   for (const m of line.matchAll(COMPACT)) {
     const parts = (m[0].match(COMPACT_PART) ?? []).map((part) => COMPACT_INDEX[part]!);
